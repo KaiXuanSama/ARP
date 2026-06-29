@@ -32,6 +32,12 @@ build/
 ### VS Code ###
 .vscode/
 
+### Frontend ###
+frontend/node_modules/
+frontend/node/
+frontend/dist/
+src/main/resources/static/
+
 ### Runtime configuration ###
 application.yml
 
