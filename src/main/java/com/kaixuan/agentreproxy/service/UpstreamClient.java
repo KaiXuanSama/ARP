@@ -74,10 +74,14 @@ public class UpstreamClient {
                         .uri(UpstreamConstants.BILLING_BASE_URL + path)
                         .headers(h -> applyAuth(h, actualInfo))
                         .bodyValue(body)
-                        .retrieve()
-                        .onStatus(s -> true, resp -> reactor.core.publisher.Mono.empty())
-                        .toEntity(MAP_TYPE)
-                        .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
+                        .exchangeToMono(resp -> resp.bodyToMono(MAP_TYPE)
+                                // 任何状态码都读取 body，组装成 ResponseEntity 返回，不抛异常
+                                .defaultIfEmpty(new java.util.HashMap<>())
+                                .map(bodyMap -> org.springframework.http.ResponseEntity
+                                        .status(resp.statusCode())
+                                        .headers(resp.headers().asHttpHeaders())
+                                        .body(bodyMap)))
+                .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
     }
 
     /**
