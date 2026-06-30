@@ -113,9 +113,8 @@ public record WorkbuddyDesktopInfo(
         if (authRaw != null && !authRaw.isBlank()) {
             try {
                 Map<String, Object> raw = objectMapper.readValue(authRaw, MAP_TYPE);
-                Object v;
-                if ((v = raw.get("expiresIn")) instanceof Number n) expiresIn = n.longValue();
-                if ((v = raw.get("refreshExpiresIn")) instanceof Number n) refreshExpiresIn = n.longValue();
+                if (raw.get("expiresIn") instanceof Number n) expiresIn = n.longValue();
+                if (raw.get("refreshExpiresIn") instanceof Number n) refreshExpiresIn = n.longValue();
                 refreshToken = asString(raw.get("refreshToken"));
                 tokenType = asStringOrDefault(raw.get("tokenType"), "Bearer");
                 scope = asString(raw.get("scope"));

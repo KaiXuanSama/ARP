@@ -42,6 +42,29 @@ public class WorkbuddyAccountJdbcRepository {
         return list.stream().findFirst();
     }
 
+    /**
+     * 按主键 id 查单条记录（用主键索引，比 findAll().stream().filter() 高效）
+     */
+    public Optional<WorkbuddyAccountRecord> findById(Long id) {
+        if (id == null) return Optional.empty();
+        List<WorkbuddyAccountRecord> list = jdbcTemplate.query(
+                "SELECT id, uid, account_json, access_token, api_key, extra, created_at, updated_at " +
+                        "FROM workbuddy_account WHERE id = ?",
+                ROW_MAPPER, id);
+        return list.stream().findFirst();
+    }
+
+    /**
+     * 按主键 id 批量查（IN 查询）。ids 为空/空集合时返回空列表
+     */
+    public List<WorkbuddyAccountRecord> findAllByIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) return List.of();
+        String placeholders = String.join(",", ids.stream().map(i -> "?").toList());
+        String sql = "SELECT id, uid, account_json, access_token, api_key, extra, created_at, updated_at " +
+                "FROM workbuddy_account WHERE id IN (" + placeholders + ") ORDER BY id ASC";
+        return jdbcTemplate.query(sql, ROW_MAPPER, ids.toArray());
+    }
+
     public List<WorkbuddyAccountRecord> findAll() {
         return jdbcTemplate.query(
                 "SELECT id, uid, account_json, access_token, api_key, extra, created_at, updated_at " +

@@ -1,14 +1,20 @@
 package com.kaixuan.agentreproxy.service;
 
 import com.kaixuan.agentreproxy.constants.UpstreamConstants;
+import com.kaixuan.agentreproxy.dto.AuthCredential;
+import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
+import com.kaixuan.agentreproxy.exception.MissingCredentialException;
 import com.kaixuan.agentreproxy.model.WorkbuddyDesktopInfo;
+import com.kaixuan.agentreproxy.repository.WorkbuddyAccountJdbcRepository;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.Map;
@@ -16,10 +22,15 @@ import java.util.Map;
 /**
  * 腾讯 CodeBuddy 上游 API 客户端
  * <p>
- * 职责：
- * - 注入全局 WebClient.Builder（已配置 JDK DNS 解析器）
- * - 自动附加认证头（API Key 模式优先，缺失则用 JWT）
- * - 提供 Chat 流式与 Billing 非流式调用
+ * 凭证解析（accessToken / apiKey）下沉到本类内部，对调用方透明：
+ * 调用方只需要提供 {@code accountId}，由 {@link #resolveAuth(Long)} 查数据库并构造 {@link AuthCredential}。
+ * <p>
+ * 认证优先级（见 {@link AuthCredential.SourceMode}）：
+ * <ul>
+ *   <li>有 accessToken → JWT 全套头（Authorization + X-User-Id + X-Domain）</li>
+ *   <li>否则有 apiKey → 仅 Authorization（不带 X-User-Id / X-Domain）</li>
+ *   <li>都没有 → 抛 {@link MissingCredentialException}</li>
+ * </ul>
  */
 @Service
 public class UpstreamClient {
@@ -29,63 +40,59 @@ public class UpstreamClient {
 
     private final WebClient webClient;
     private final WorkbuddyInfoService workbuddyInfoService;
+    private final WorkbuddyAccountJdbcRepository accountRepository;
 
-    public UpstreamClient(WebClient.Builder builder, WorkbuddyInfoService workbuddyInfoService) {
+    public UpstreamClient(WebClient.Builder builder,
+                          WorkbuddyInfoService workbuddyInfoService,
+                          WorkbuddyAccountJdbcRepository accountRepository) {
         this.webClient = builder
                 .clone()
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
         this.workbuddyInfoService = workbuddyInfoService;
+        this.accountRepository = accountRepository;
     }
 
+    // ============== Billing（按 accountId 路由） ==============
+
     /**
-     * 调用 Billing 类端点（POST 空 body）
+     * 调用 Billing 类端点（POST 空 body）。accountId 来自数据库主键，路径用 {accountId} 而非 uid
      * <p>
      * 4xx 也读取 body 透传，不抛异常——上游常用 HTTP 400 携带业务码（如 10001 已签到）
-     *
-     * @param path 上游路径，例如 /v2/billing/meter/get-user-resource
      */
-    public Mono<org.springframework.http.ResponseEntity<Map<String, Object>>> postBilling(String path) {
-        return postBillingJson(path, Map.of());
+    public Mono<ResponseEntity<Map<String, Object>>> postBillingForAccount(Long accountId, String path) {
+        return postBillingJsonForAccount(accountId, path, Map.of());
     }
 
     /**
-     * 调用 Billing 类端点（POST 自定义 body）
+     * 调用 Billing 类端点（POST 自定义 body），按 accountId 路由
      * <p>
-     * 4xx 也读取 body 透传，不抛异常——上游常用 HTTP 400 携带业务码
+     * 整条链路是响应式的：先在 boundedElastic 上查 DB 拿凭证（不阻塞 reactor 线程），
+     * 再用凭证拼头调上游。绝不能在 reactor 事件循环上 .block()
      */
-    public Mono<org.springframework.http.ResponseEntity<Map<String, Object>>> postBillingJson(String path, Map<String, Object> body) {
-        return postBillingJsonWithInfo(path, body, null);
-    }
-
-    /**
-     * 调用 Billing 类端点（POST 自定义 body），使用外部传入的账户信息
-     * <p>
-     * 如果 info 为 null，则回退到本机配置文件
-     */
-    public Mono<org.springframework.http.ResponseEntity<Map<String, Object>>> postBillingJsonWithInfo(
-            String path, Map<String, Object> body, WorkbuddyDesktopInfo info
+    public Mono<ResponseEntity<Map<String, Object>>> postBillingJsonForAccount(
+            Long accountId, String path, Map<String, Object> body
     ) {
-        Mono<WorkbuddyDesktopInfo> infoMono = info != null
-                ? Mono.just(info)
-                : workbuddyInfoService.getAccountInfoSafely();
-        return infoMono
-                .flatMap(actualInfo -> webClient.post()
+        return resolveAuth(accountId)
+                .flatMap(cred -> webClient.post()
                         .uri(UpstreamConstants.BILLING_BASE_URL + path)
-                        .headers(h -> applyAuth(h, actualInfo))
+                        .headers(h -> applyAuth(h, cred))
                         .bodyValue(body)
                         .exchangeToMono(resp -> resp.bodyToMono(MAP_TYPE)
-                                // 任何状态码都读取 body，组装成 ResponseEntity 返回，不抛异常
                                 .defaultIfEmpty(new java.util.HashMap<>())
-                                .map(bodyMap -> org.springframework.http.ResponseEntity
+                                .map(bodyMap -> ResponseEntity
                                         .status(resp.statusCode())
                                         .headers(resp.headers().asHttpHeaders())
                                         .body(bodyMap)))
-                .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
+                        .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
     }
 
+    // ============== Chat（暂保留旧路径，后续单独立项改造） ==============
+
     /**
-     * 调用 Chat 补全端点（流式）
+     * 调用 Chat 补全端点（流式 SSE 透传）
+     * <p>
+     * TODO: 当前仍用本机 .info 的 JWT，跟多账户体系不一致；后续会跟 Billing 一样走 forAccountId(accountId) 路径
      *
      * @param body 完整的请求体（含 model/messages/stream 等）
      */
@@ -93,25 +100,112 @@ public class UpstreamClient {
         return workbuddyInfoService.getAccountInfoSafely()
                 .flatMapMany(info -> webClient.post()
                         .uri(UpstreamConstants.CHAT_BASE_URL + "/chat/completions")
-                        .headers(h -> applyAuth(h, info))
+                        .headers(h -> applyLegacyAuth(h, info))
                         .bodyValue(body)
                         .retrieve()
                         .bodyToFlux(String.class)
                         .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
     }
 
-    private void applyAuth(HttpHeaders headers, WorkbuddyDesktopInfo info) {
-        // 1) 优先 API Key（推荐模式）
-        //    暂未实现手动 API Key 注入，后续在 controller 层补
-        // 2) 否则用 JWT
-        if (info.auth() != null && info.auth().accessToken() != null
+    // ============== 旧路径（已废弃） ==============
+
+    /**
+     * @deprecated 用 {@link #postBillingJsonForAccount(Long, String, Map)} 替代
+     */
+    @Deprecated
+    public Mono<ResponseEntity<Map<String, Object>>> postBillingJsonWithInfo(
+            String path, Map<String, Object> body, WorkbuddyDesktopInfo info
+    ) {
+        return workbuddyInfoService.getAccountInfoSafely()
+                .flatMap(actualInfo -> webClient.post()
+                        .uri(UpstreamConstants.BILLING_BASE_URL + path)
+                        .headers(h -> applyLegacyAuth(h, actualInfo))
+                        .bodyValue(body)
+                        .exchangeToMono(resp -> resp.bodyToMono(MAP_TYPE)
+                                .defaultIfEmpty(new java.util.HashMap<>())
+                                .map(bodyMap -> ResponseEntity
+                                        .status(resp.statusCode())
+                                        .headers(resp.headers().asHttpHeaders())
+                                        .body(bodyMap)))
+                        .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
+    }
+
+    // ============== 凭证解析 ==============
+
+    /**
+     * 根据 accountId 从数据库读取 accessToken / apiKey，构造 {@link AuthCredential}
+     * <p>
+     * 纯响应式实现：DB 查询在 boundedElastic 上跑，调用方需用 flatMap 串到下游。
+     * <p>
+     * accountId 为 null → 立即抛 {@link MissingCredentialException}(由 flatMap 透传为 onError)
+     * 账户不存在 → 同上
+     * accessToken 与 apiKey 都没有 → 同上
+     */
+    public Mono<AuthCredential> resolveAuth(Long accountId) {
+        if (accountId == null) {
+            return Mono.error(new MissingCredentialException("accountId 不能为空"));
+        }
+        return Mono.fromCallable(() -> accountRepository.findById(accountId))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMap(opt -> {
+                    if (opt.isEmpty()) {
+                        return Mono.error(new MissingCredentialException("账户不存在 (id=" + accountId + ")"));
+                    }
+                    return Mono.just(buildCredential(opt.get()));
+                });
+    }
+
+    private AuthCredential buildCredential(WorkbuddyAccountRecord rec) {
+        String token = trimToNull(rec.accessToken());
+        String apiKey = trimToNull(rec.apiKey());
+        String uid = rec.uid();
+        if (token != null) {
+            return new AuthCredential(token, null, uid, AuthCredential.SourceMode.JWT);
+        }
+        if (apiKey != null) {
+            return new AuthCredential(null, apiKey, null, AuthCredential.SourceMode.API_KEY);
+        }
+        throw new MissingCredentialException(
+                "账户(id=" + rec.id() + ", uid=" + uid + ") 缺少 accessToken 与 apiKey，至少需要其中一个");
+    }
+
+    // ============== 头拼接 ==============
+
+    private void applyAuth(HttpHeaders headers, AuthCredential cred) {
+        switch (cred.sourceMode()) {
+            case JWT -> {
+                headers.setBearerAuth(cred.accessToken());
+                if (cred.uidForHeader() != null && !cred.uidForHeader().isBlank()) {
+                    headers.set("X-User-Id", cred.uidForHeader());
+                }
+                headers.set("X-Domain", UpstreamConstants.JWT_DOMAIN);
+            }
+            case API_KEY -> {
+                // API Key 模式只带 Authorization，不带 X-User-Id / X-Domain
+                headers.setBearerAuth(cred.apiKey());
+            }
+        }
+    }
+
+    /**
+     * 旧路径用的头拼接（仅 JWT 模式，从 WorkbuddyDesktopInfo 拿 token）。
+     * 留作 Chat / postBillingJsonWithInfo 的过渡实现
+     */
+    private void applyLegacyAuth(HttpHeaders headers, WorkbuddyDesktopInfo info) {
+        if (info != null && info.auth() != null
+                && info.auth().accessToken() != null
                 && !info.auth().accessToken().isBlank()) {
             headers.setBearerAuth(info.auth().accessToken());
-            // JWT 模式需要额外 header
             if (info.account() != null && info.account().uid() != null) {
                 headers.set("X-User-Id", info.account().uid());
             }
             headers.set("X-Domain", UpstreamConstants.JWT_DOMAIN);
         }
+    }
+
+    private static String trimToNull(String s) {
+        if (s == null) return null;
+        String t = s.trim();
+        return t.isEmpty() ? null : t;
     }
 }

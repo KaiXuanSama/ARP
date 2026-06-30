@@ -1,13 +1,11 @@
 package com.kaixuan.agentreproxy.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaixuan.agentreproxy.constants.UpstreamConstants;
 import com.kaixuan.agentreproxy.dto.CheckinResultItem;
 import com.kaixuan.agentreproxy.dto.CheckinStatusItem;
 import com.kaixuan.agentreproxy.entity.CheckinLogRecord;
 import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
-import com.kaixuan.agentreproxy.model.WorkbuddyDesktopInfo;
 import com.kaixuan.agentreproxy.repository.CheckinLogJdbcRepository;
 import com.kaixuan.agentreproxy.repository.WorkbuddyAccountJdbcRepository;
 import org.slf4j.Logger;
@@ -26,7 +24,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Objects;
 
 /**
  * 每日签到服务
@@ -45,7 +43,6 @@ import java.util.Optional;
 public class CheckinService {
 
     private static final Logger log = LoggerFactory.getLogger(CheckinService.class);
-    private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     /** 签到类型（当前唯一一种，未来可扩展） */
     public static final String CHECKIN_TYPE_DAILY = "daily";
@@ -54,18 +51,15 @@ public class CheckinService {
     private static final int CODE_ALREADY_CHECKED_IN = 10001;
 
     private final UpstreamClient upstreamClient;
-    private final AccountExtraService accountExtraService;
     private final CheckinLogJdbcRepository checkinLogRepository;
     private final WorkbuddyAccountJdbcRepository accountRepository;
     private final ObjectMapper objectMapper;
 
     public CheckinService(UpstreamClient upstreamClient,
-                          AccountExtraService accountExtraService,
                           CheckinLogJdbcRepository checkinLogRepository,
                           WorkbuddyAccountJdbcRepository accountRepository,
                           ObjectMapper objectMapper) {
         this.upstreamClient = upstreamClient;
-        this.accountExtraService = accountExtraService;
         this.checkinLogRepository = checkinLogRepository;
         this.accountRepository = accountRepository;
         this.objectMapper = objectMapper;
@@ -180,16 +174,12 @@ public class CheckinService {
 
     private CheckinResultItem executeSingle(WorkbuddyAccountRecord acc) {
         String nickname = extractNickname(acc.accountJson());
-        WorkbuddyDesktopInfo info = accountExtraService.readAccountInfo(acc.uid());
-        if (info == null || info.auth() == null || info.auth().accessToken() == null
-                || info.auth().accessToken().isBlank()) {
-            return new CheckinResultItem(acc.id(), acc.uid(), nickname, "error", "账户缺少 accessToken");
-        }
 
         long now = System.currentTimeMillis();
         try {
+            // 凭证由 UpstreamClient 内部按 accountId 解析（accessToken 优先，否则 apiKey，都没有则抛 MissingCredentialException）
             ResponseEntity<Map<String, Object>> resp = upstreamClient
-                    .postBillingJsonWithInfo(UpstreamConstants.PATH_DAILY_CHECKIN, Map.of(), info)
+                    .postBillingForAccount(acc.id(), UpstreamConstants.PATH_DAILY_CHECKIN)
                     .block();
 
             Map<String, Object> body = resp == null ? null : resp.getBody();
@@ -229,22 +219,11 @@ public class CheckinService {
         if (accountIds == null || accountIds.isEmpty()) {
             return accountRepository.findAll();
         }
-        List<WorkbuddyAccountRecord> result = new ArrayList<>(accountIds.size());
-        for (Long id : accountIds) {
-            if (id == null) continue;
-            // findByUid 不行，需要 findById
-            Optional<WorkbuddyAccountRecord> rec = findById(id);
-            rec.ifPresent(result::add);
-        }
-        return result;
-    }
-
-    /**
-     * 通过 id 查找账号（WorkbuddyAccountJdbcRepository 现成没有此方法，
-     * 简单用 findAll() 过滤实现，数据量小不构成性能问题）
-     */
-    private Optional<WorkbuddyAccountRecord> findById(Long id) {
-        return accountRepository.findAll().stream().filter(a -> id.equals(a.id())).findFirst();
+        // 过滤 null/非法 id，剩下用 IN 一次查完
+        List<Long> ids = accountIds.stream()
+                .filter(Objects::nonNull)
+                .toList();
+        return accountRepository.findAllByIds(ids);
     }
 
     private int readCode(Map<String, Object> body) {

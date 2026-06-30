@@ -1,7 +1,6 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.dto.CheckinExecuteRequest;
-import com.kaixuan.agentreproxy.dto.CheckinResultItem;
 import com.kaixuan.agentreproxy.dto.CheckinStatusItem;
 import com.kaixuan.agentreproxy.dto.CheckinStatusRequest;
 import com.kaixuan.agentreproxy.service.CheckinService;

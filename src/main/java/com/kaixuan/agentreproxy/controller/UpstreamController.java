@@ -39,19 +39,20 @@ public class UpstreamController {
     //   get-user-resource        资源包列表（Cycle*Precise 周期内精确值）
     //   get-user-request-usage   时段用量明细（含 total）
     // 注：上游 Billing 端点可能在 HTTP 400 携带业务码，UpstreamClient 已配置 4xx 透传 body
-    // 路径变量 {uid} 标记数据归属，调用后会被记录到该账户的 extra 字段中
+    // 路径变量 {accountId} 是数据库 workbuddy_account.id 主键；UpstreamClient 内部按 id 查凭证
+    // 凭证解析：accessToken 优先，否则用 api_key；都没有则 MissingCredentialException → 400
 
-    @PostMapping("/billing/{uid}/user-resource")
-    public Mono<ResponseEntity<Map<String, Object>>> getUserResource(@PathVariable String uid) {
-        return billingQueryService.queryCredit(uid);
+    @PostMapping("/billing/{accountId}/user-resource")
+    public Mono<ResponseEntity<Map<String, Object>>> getUserResource(@PathVariable Long accountId) {
+        return billingQueryService.queryCredit(accountId);
     }
 
-    @PostMapping("/billing/{uid}/user-request-usage")
+    @PostMapping("/billing/{accountId}/user-request-usage")
     public Mono<ResponseEntity<Map<String, Object>>> getUserRequestUsage(
-            @PathVariable String uid,
+            @PathVariable Long accountId,
             @RequestBody(required = false) com.kaixuan.agentreproxy.dto.UsageQueryRequest req
     ) {
-        return billingQueryService.queryUsage(uid, req);
+        return billingQueryService.queryUsage(accountId, req);
     }
 
     // ============== Chat ==============

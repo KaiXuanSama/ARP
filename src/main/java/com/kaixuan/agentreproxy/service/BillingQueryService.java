@@ -2,8 +2,8 @@ package com.kaixuan.agentreproxy.service;
 
 import com.kaixuan.agentreproxy.constants.UpstreamConstants;
 import com.kaixuan.agentreproxy.dto.UsageQueryRequest;
-import com.kaixuan.agentreproxy.model.WorkbuddyDesktopInfo;
-import org.springframework.http.HttpStatus;
+import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
+import com.kaixuan.agentreproxy.repository.WorkbuddyAccountJdbcRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -16,12 +16,16 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Billing 查询编排：调用上游 → 提取必要字段 → 写入数据库 extra 字段
  * <p>
  * 不做缓存，每次都真实查询上游；extra 仅作为"上一次查询结果的快照"，
  * 供其他功能读取，避免频繁调用上游。
+ * <p>
+ * 入参从 uid 改为 accountId（数据库主键），凭证由 {@link UpstreamClient} 内部按 accountId 解析。
+ * 写 extra 时按 uid 作 key —— extra 是按 uid 索引的，前端 localStorage 也按 uid 缓存。
  * <p>
  * 真实接口（经官方页面抓包确认）：
  * <ul>
@@ -32,27 +36,28 @@ import java.util.Map;
 @Service
 public class BillingQueryService {
 
-    private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-
-    /** 上游接受的时间格式：yyyy-MM-dd HH:mm:ss（注意空格分隔，不是 T） */
+    /** 上游接受的时间格式:yyyy-MM-dd HH:mm:ss(注意空格分隔,不是 T) */
     private static final DateTimeFormatter UPSTREAM_DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final UpstreamClient upstreamClient;
     private final AccountExtraService accountExtraService;
+    private final WorkbuddyAccountJdbcRepository accountRepository;
 
-    public BillingQueryService(UpstreamClient upstreamClient, AccountExtraService accountExtraService) {
+    public BillingQueryService(UpstreamClient upstreamClient,
+                               AccountExtraService accountExtraService,
+                               WorkbuddyAccountJdbcRepository accountRepository) {
         this.upstreamClient = upstreamClient;
         this.accountExtraService = accountExtraService;
+        this.accountRepository = accountRepository;
     }
 
     /**
      * 查询积分资源包 → 写入 extra.credit
      */
-    public Mono<ResponseEntity<Map<String, Object>>> queryCredit(String uid) {
-        WorkbuddyDesktopInfo info = accountExtraService.readAccountInfo(uid);
-        return upstreamClient.postBillingJsonWithInfo(UpstreamConstants.PATH_USER_RESOURCE, Map.of(), info)
+    public Mono<ResponseEntity<Map<String, Object>>> queryCredit(Long accountId) {
+        return upstreamClient.postBillingForAccount(accountId, UpstreamConstants.PATH_USER_RESOURCE)
                 .map(resp -> {
-                    Map<String, Object> credit = persistCredit(uid, resp);
+                    Map<String, Object> credit = persistCredit(accountId, resp);
                     return withExtra(resp, credit == null ? null : Map.of("credit", credit));
                 });
     }
@@ -62,7 +67,7 @@ public class BillingQueryService {
      * <p>
      * 不传日期时默认查最近 7 天
      */
-    public Mono<ResponseEntity<Map<String, Object>>> queryUsage(String uid, UsageQueryRequest req) {
+    public Mono<ResponseEntity<Map<String, Object>>> queryUsage(Long accountId, UsageQueryRequest req) {
         Map<String, Object> body = new HashMap<>();
         if (req != null) {
             if (req.startTime() != null) body.put("startTime", normalizeTime(req.startTime()));
@@ -80,19 +85,19 @@ public class BillingQueryService {
         if (!body.containsKey("pageNum")) body.put("pageNum", 1);
         if (!body.containsKey("pageSize")) body.put("pageSize", 50);
 
-        WorkbuddyDesktopInfo info = accountExtraService.readAccountInfo(uid);
-        Map<String, Object> finalBody = body;
-        return upstreamClient.postBillingJsonWithInfo(UpstreamConstants.PATH_USER_REQUEST_USAGE, finalBody, info)
+        return upstreamClient.postBillingJsonForAccount(accountId, UpstreamConstants.PATH_USER_REQUEST_USAGE, body)
                 .map(resp -> {
-                    Map<String, Object> usage = persistUsage(uid, resp);
+                    Map<String, Object> usage = persistUsage(accountId, resp);
                     return withExtra(resp, usage == null ? null : Map.of("usage", usage));
                 });
     }
 
     // ============== 私有：抽取精简 snapshot ==============
 
-    private Map<String, Object> persistCredit(String uid, ResponseEntity<Map<String, Object>> resp) {
-        if (uid == null || uid.isBlank()) return null;
+    private Map<String, Object> persistCredit(Long accountId, ResponseEntity<Map<String, Object>> resp) {
+        if (accountId == null) return null;
+        String uid = resolveUid(accountId);
+        if (uid == null) return null;
         Map<String, Object> body = resp.getBody();
         if (body == null) return null;
 
@@ -147,8 +152,10 @@ public class BillingQueryService {
         return credit;
     }
 
-    private Map<String, Object> persistUsage(String uid, ResponseEntity<Map<String, Object>> resp) {
-        if (uid == null || uid.isBlank()) return null;
+    private Map<String, Object> persistUsage(Long accountId, ResponseEntity<Map<String, Object>> resp) {
+        if (accountId == null) return null;
+        String uid = resolveUid(accountId);
+        if (uid == null) return null;
         Map<String, Object> body = resp.getBody();
         if (body == null) return null;
 
@@ -163,7 +170,16 @@ public class BillingQueryService {
         Map<String, Object> usage = new HashMap<>();
         usage.put("fetchedAt", System.currentTimeMillis());
         usage.put("total", asNumber(data.get("total"), 0));
+        accountExtraService.mergeKey(uid, "usage", usage);
         return usage;
+    }
+
+    /**
+     * 按 accountId 查 uid（仅在响应 code=0 时调用，前面已经走过上游，DB 查询很轻）
+     */
+    private String resolveUid(Long accountId) {
+        Optional<WorkbuddyAccountRecord> rec = accountRepository.findById(accountId);
+        return rec.map(WorkbuddyAccountRecord::uid).orElse(null);
     }
 
     /**

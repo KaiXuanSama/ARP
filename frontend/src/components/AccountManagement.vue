@@ -197,9 +197,11 @@ async function refreshExtras() {
   const tasks = tableData.value
     .filter((row) => row.uid && row.uid !== '-')
     .map(async (row) => {
+      // 后端 /api/billing 路径变量改用 accountId（数据库主键），不再用 uid
+      // localStorage 缓存仍按 uid 索引（与 backend extra 字段对齐）
       await Promise.allSettled([
-        fetchAndStore(row.uid, 'credit', `/api/billing/${row.uid}/user-resource`),
-        fetchAndStore(row.uid, 'usage', `/api/billing/${row.uid}/user-request-usage`, buildUsageQueryBody(7)),
+        fetchAndStore(row.uid, 'credit', `/api/billing/${row.id}/user-resource`),
+        fetchAndStore(row.uid, 'usage', `/api/billing/${row.id}/user-request-usage`, buildUsageQueryBody(7)),
       ])
     })
   await Promise.allSettled(tasks)
@@ -374,8 +376,7 @@ async function oneClickCheckin() {
     let okCount = 0
     let alreadyCount = 0
     let errCount = 0
-    // 记录本次"我刚签到成功"的 uid，用于签到后刷积分显示
-    const freshUids: string[] = []
+    const freshRows: AccountRow[] = []
     for (const r of results) {
       const row = tableData.value.find((x) => x.id === r.accountId)
       if (!row) continue
@@ -388,12 +389,13 @@ async function oneClickCheckin() {
         }
         row.checkin = snap
         if (row.uid && row.uid !== '-') setCheckinSnapshot(row.uid, snap)
-        // 仅收集本次"新签到成功"的 uid（already_checked_in 不刷，因为上游没返新积分）
-        if (r.status === 'checked_in' && row.uid && row.uid !== '-') {
-          freshUids.push(row.uid)
+        // 仅收集本次"新签到成功"的账号（already_checked_in 不刷，因为上游没返新积分）
+        if (r.status === 'checked_in') {
+          freshRows.push(row)
+          okCount++
+        } else {
+          alreadyCount++
         }
-        if (r.status === 'checked_in') okCount++
-        else alreadyCount++
       } else {
         errCount++
         message.warning(`账号 ${row.nickname || r.uid} 签到失败: ${r.message || '未知错误'}`)
@@ -405,8 +407,8 @@ async function oneClickCheckin() {
     if (errCount > 0) parts.push(`失败 ${errCount}`)
     message.success(`签到完成: ${parts.join(' / ')}`)
     // 签到成功后立即刷新本次新签成功账号的积分剩余（不刷已签过的、也不刷失败的）
-    if (freshUids.length > 0) {
-      await refreshCreditForUids(freshUids)
+    if (freshRows.length > 0) {
+      await refreshCreditForRows(freshRows)
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : '未知错误'
@@ -417,14 +419,17 @@ async function oneClickCheckin() {
 }
 
 /**
- * 仅刷新指定 uid 列表的"积分剩余"（user-resource），不刷 usage、不弹全局成功提示
+ * 仅刷新指定账号行列表的"积分剩余"（user-resource），不刷 usage、不弹全局成功提示
  * <p>
  * 用于：一键签到后只对"本次新签到成功"的账号拉最新积分数据，立即看到新加的积分
+ * <p>
+ * 后端路径用 accountId（数据库主键）作为路由变量
  */
-async function refreshCreditForUids(uids: string[]) {
-  if (uids.length === 0) return
-  const tasks = uids.map(async (uid) => {
-    await fetchAndStore(uid, 'credit', `/api/billing/${uid}/user-resource`)
+async function refreshCreditForRows(rows: AccountRow[]) {
+  if (rows.length === 0) return
+  const tasks = rows.map(async (row) => {
+    if (!row.uid || row.uid === '-') return
+    await fetchAndStore(row.uid, 'credit', `/api/billing/${row.id}/user-resource`)
   })
   await Promise.allSettled(tasks)
   // 重新合成最新 tableData(从 localStorage 拉新缓存)
