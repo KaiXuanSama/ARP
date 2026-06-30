@@ -64,4 +64,18 @@ public class WorkbuddyInfoService {
     public boolean isInfoFileAvailable() {
         return Files.exists(INFO_FILE_PATH);
     }
+
+    /**
+     * 安全读取配置（失败时返回空对象，不抛异常）
+     */
+    public reactor.core.publisher.Mono<WorkbuddyDesktopInfo> getAccountInfoSafely() {
+        return reactor.core.publisher.Mono.fromCallable(() -> {
+            try {
+                return readInfo();
+            } catch (Exception e) {
+                log.warn("读取 CodeBuddy 配置失败: {}", e.getMessage());
+                return new WorkbuddyDesktopInfo(null, null);
+            }
+        });
+    }
 }
