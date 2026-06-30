@@ -2,6 +2,16 @@ spring:
   application:
     name: agentreproxy
 
+  # SQLite 数据源配置（关键：无此配置服务无法启动）
+  datasource:
+    url: jdbc:sqlite:admin.db
+    driver-class-name: org.sqlite.JDBC
+
+  # 自动执行 schema.sql 初始化表结构
+  sql:
+    init:
+      mode: always
+
 # Docker 环境配置
 server:
   port: 8351
