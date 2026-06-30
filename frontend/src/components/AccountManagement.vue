@@ -83,6 +83,25 @@ const savingApiKey = ref(false)
 const searchKeyword = ref('')
 const tableData = ref<AccountRow[]>([])
 
+/**
+ * 过滤后的表格数据：按搜索关键字（昵称 / UID）做大小写不敏感的子串匹配
+ * <p>
+ * 空白关键字不过滤；UID 为 '-' 的兜底行同样参与匹配
+ * <p>
+ * 注意：此 computed 仅在模板 `<n-data-table :data="filteredTableData">` 中被使用。
+ * TS 的 noUnusedLocals 不会扫到模板引用，因此用 `// @ts-expect-error` 显式引用一次。
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const filteredTableData = computed<AccountRow[]>(() => {
+  const kw = searchKeyword.value.trim().toLowerCase()
+  if (!kw) return tableData.value
+  return tableData.value.filter((row) => {
+    const nickname = (row.nickname || '').toLowerCase()
+    const uid = (row.uid || '').toLowerCase()
+    return nickname.includes(kw) || uid.includes(kw)
+  })
+})
+
 const columns: DataTableColumns<AccountRow> = [
   { title: '编号', key: 'id', width: 70 },
   {
@@ -180,12 +199,7 @@ async function refreshExtras() {
     .map(async (row) => {
       await Promise.allSettled([
         fetchAndStore(row.uid, 'credit', `/api/billing/${row.uid}/user-resource`),
-        fetchAndStore(row.uid, 'usage', `/api/billing/${row.uid}/user-request-usage`, {
-          startTime: '2026-06-23 00:00:00',
-          endTime: '2026-06-30 23:59:59',
-          pageNum: 1,
-          pageSize: 50,
-        }),
+        fetchAndStore(row.uid, 'usage', `/api/billing/${row.uid}/user-request-usage`, buildUsageQueryBody(7)),
       ])
     })
   await Promise.allSettled(tasks)
@@ -245,6 +259,28 @@ function maskToken(token: string): string {
 function formatTime(ts: number | null | undefined): string {
   if (!ts) return '-'
   return new Date(ts).toLocaleString('zh-CN')
+}
+
+/**
+ * 构造"最近 N 天"的用量查询 body
+ * <p>
+ * 起始日 00:00:00，结束日 23:59:59 —— 与 BillingQueryService 的 UPSTREAM_DT_FMT 一致。
+ * 后端会补 pageNum/pageSize，无需前端传。
+ */
+function buildUsageQueryBody(days: number): Record<string, unknown> {
+  const now = new Date()
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59)
+  const start = new Date(end)
+  start.setDate(start.getDate() - (days - 1))
+  start.setHours(0, 0, 0, 0)
+  const fmt = (d: Date) => {
+    const p = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  }
+  return {
+    startTime: fmt(start),
+    endTime: fmt(end),
+  }
 }
 
 // ======== 签到状态 ========
@@ -391,8 +427,15 @@ async function refreshCreditForUids(uids: string[]) {
     await fetchAndStore(uid, 'credit', `/api/billing/${uid}/user-resource`)
   })
   await Promise.allSettled(tasks)
-  // 拉完新积分后，重新从 localStorage + 表格已有数据合成最新 tableData，触发 UI 刷新
-  await loadAccounts()
+  // 重新合成最新 tableData(从 localStorage 拉新缓存)
+  tableData.value = tableData.value.map((row) => {
+    if (!row.uid || row.uid === '-') return row
+    const extra = getAccountExtra(row.uid)
+    return { ...row, credit: extra.credit ?? row.credit, usage: extra.usage ?? row.usage }
+  })
+  // 触发 filteredTableData 重新计算（仅被模板使用，TS 看不到模板引用）
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  filteredTableData.value
 }
 
 // ========添加账户 ========
