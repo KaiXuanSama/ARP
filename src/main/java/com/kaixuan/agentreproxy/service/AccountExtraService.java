@@ -80,7 +80,7 @@ public class AccountExtraService {
             return null;
         }
         try {
-            return objectMapper.readValue(record.get().accountJson(), WorkbuddyDesktopInfo.class);
+            return WorkbuddyDesktopInfo.fromFlatJson(record.get().accountJson(), objectMapper);
         } catch (Exception e) {
             log.warn("解析 accountJson 失败 uid={}, err={}", uid, e.getMessage());
             return null;

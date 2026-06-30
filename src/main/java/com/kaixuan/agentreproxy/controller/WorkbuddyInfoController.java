@@ -67,13 +67,7 @@ public class WorkbuddyInfoController {
                     DataBufferUtils.release(buffer);
                     return new String(bytes, StandardCharsets.UTF_8);
                 })
-                .map(content -> {
-                    try {
-                        return objectMapper.readValue(content, WorkbuddyDesktopInfo.class);
-                    } catch (Exception e) {
-                        throw new IllegalArgumentException("文件解析失败: " + e.getMessage());
-                    }
-                });
+                .map(content -> WorkbuddyDesktopInfo.fromFlatJson(content, objectMapper));
     }
 
     /**
@@ -98,7 +92,7 @@ public class WorkbuddyInfoController {
         return Mono.fromCallable(() -> {
             // 1) 解析 info：优先取 info 字段，否则把整个 body 当作 info
             Object infoNode = raw.containsKey("info") ? raw.get("info") : raw;
-            WorkbuddyDesktopInfo info = objectMapper.convertValue(infoNode, WorkbuddyDesktopInfo.class);
+            WorkbuddyDesktopInfo info = parseInfo(infoNode, objectMapper);
 
             // 2) 解析 apiKey
             String apiKey = null;
@@ -146,6 +140,25 @@ public class WorkbuddyInfoController {
             return hex.toString();
         } catch (Exception e) {
             return Integer.toHexString(input.hashCode());
+        }
+    }
+
+    /**
+     * 解析 info 字段：支持 Map（前端传来的任意 JSON）回退到字符串后经 fromFlatJson 归一化
+     */
+    private static WorkbuddyDesktopInfo parseInfo(Object infoNode, ObjectMapper objectMapper) {
+        try {
+            if (infoNode == null) {
+                return new WorkbuddyDesktopInfo(null, null);
+            }
+            if (infoNode instanceof String s) {
+                return WorkbuddyDesktopInfo.fromFlatJson(s, objectMapper);
+            }
+            // Map / List 等：先序列化为 JSON 字符串再走统一入口
+            String json = objectMapper.writeValueAsString(infoNode);
+            return WorkbuddyDesktopInfo.fromFlatJson(json, objectMapper);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("账户信息解析失败: " + e.getMessage(), e);
         }
     }
 

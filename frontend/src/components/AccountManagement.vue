@@ -204,7 +204,11 @@ function extractNickname(json: string): string {
   if (!json) return '未定义'
   try {
     const obj = JSON.parse(json)
-    return obj?.account?.nickname || obj?.accounts?.[0]?.nickname || '未定义'
+    // 兼容三种结构：嵌套 account.nickname、扁平 nickname（antigravity-tools 导出）
+    return obj?.account?.nickname
+      || obj?.accounts?.[0]?.nickname
+      || obj?.nickname
+      || '未定义'
   } catch {
     return '未定义'
   }

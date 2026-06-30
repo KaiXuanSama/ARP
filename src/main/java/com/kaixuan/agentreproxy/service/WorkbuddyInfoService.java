@@ -44,7 +44,7 @@ public class WorkbuddyInfoService {
 
         String content = Files.readString(INFO_FILE_PATH);
         log.debug("成功读取配置文件: {}", INFO_FILE_PATH);
-        return objectMapper.readValue(content, WorkbuddyDesktopInfo.class);
+        return WorkbuddyDesktopInfo.fromFlatJson(content, objectMapper);
     }
 
     /**
