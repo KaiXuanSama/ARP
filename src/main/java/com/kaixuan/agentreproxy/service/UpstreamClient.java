@@ -40,17 +40,20 @@ public class UpstreamClient {
 
     /**
      * 调用 Billing 类端点（POST 空 body）
+     * <p>
+     * 4xx 也读取 body 透传，不抛异常——上游常用 HTTP 400 携带业务码（如 10001 已签到）
      *
      * @param path 上游路径，例如 /v2/billing/meter/get-user-resource
      */
-    public Mono<Map<String, Object>> postBilling(String path) {
+    public Mono<org.springframework.http.ResponseEntity<Map<String, Object>>> postBilling(String path) {
         return workbuddyInfoService.getAccountInfoSafely()
                 .flatMap(info -> webClient.post()
                         .uri(UpstreamConstants.BILLING_BASE_URL + path)
                         .headers(h -> applyAuth(h, info))
                         .bodyValue(Map.of())
                         .retrieve()
-                        .bodyToMono(MAP_TYPE)
+                        .onStatus(s -> true, resp -> reactor.core.publisher.Mono.empty())
+                        .toEntity(MAP_TYPE)
                         .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
     }
 

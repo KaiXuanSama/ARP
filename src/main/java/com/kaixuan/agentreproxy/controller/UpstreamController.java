@@ -3,6 +3,7 @@ package com.kaixuan.agentreproxy.controller;
 import com.kaixuan.agentreproxy.constants.SupportedModels;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -30,29 +31,31 @@ public class UpstreamController {
     }
 
     // ============== Billing ==============
+    // 注：上游 Billing 端点可能在 HTTP 400 携带业务码（如 10001 已签到），
+    //     UpstreamClient 已配置 4xx 透传 body，这里再把状态码一并透传给前端
 
     @PostMapping("/billing/user-resource")
-    public Mono<Map<String, Object>> getUserResource() {
+    public Mono<ResponseEntity<Map<String, Object>>> getUserResource() {
         return upstream.postBilling("/v2/billing/meter/get-user-resource");
     }
 
     @PostMapping("/billing/checkin-status")
-    public Mono<Map<String, Object>> checkinStatus() {
+    public Mono<ResponseEntity<Map<String, Object>>> checkinStatus() {
         return upstream.postBilling("/v2/billing/meter/checkin-status");
     }
 
     @PostMapping("/billing/daily-checkin")
-    public Mono<Map<String, Object>> dailyCheckin() {
+    public Mono<ResponseEntity<Map<String, Object>>> dailyCheckin() {
         return upstream.postBilling("/v2/billing/meter/daily-checkin");
     }
 
     @PostMapping("/billing/payment-type")
-    public Mono<Map<String, Object>> getPaymentType() {
+    public Mono<ResponseEntity<Map<String, Object>>> getPaymentType() {
         return upstream.postBilling("/v2/billing/meter/get-payment-type");
     }
 
     @PostMapping("/billing/dosage-notify")
-    public Mono<Map<String, Object>> getDosageNotify() {
+    public Mono<ResponseEntity<Map<String, Object>>> getDosageNotify() {
         return upstream.postBilling("/v2/billing/meter/get-dosage-notify");
     }
 
