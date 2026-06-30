@@ -69,3 +69,6 @@ src/main/resources/static/index.html
 
 # GitHub Actions
 .github
+
+# JSON files
+*.json
