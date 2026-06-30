@@ -25,6 +25,8 @@ public final class UpstreamConstants {
     public static final String PATH_USER_RESOURCE = "/billing/meter/get-user-resource";
     /** 时段用量明细（带 total） */
     public static final String PATH_USER_REQUEST_USAGE = "/billing/meter/get-user-request-usage";
+    /** 每日签到（带 /v2 前缀） */
+    public static final String PATH_DAILY_CHECKIN = "/v2/billing/meter/daily-checkin";
 
     private UpstreamConstants() {}
 }

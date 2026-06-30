@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { h, onMounted, ref } from 'vue'
+import { h, computed, onMounted, ref } from 'vue'
 import {
   NButton, NModal, NCard, NDescriptions, NDescriptionsItem,
   NSpin, NSpace, NDataTable, NInput, NUpload, useMessage,
@@ -9,8 +9,11 @@ import Icon from './Icon.vue'
 import {
   getAccountExtra,
   mergeAccountExtra,
+  getCheckinSnapshot,
+  setCheckinSnapshot,
   type CreditSnapshot,
   type UsageSnapshot,
+  type CheckinSnapshot,
 } from '../utils/accountExtras'
 
 interface WorkbuddyInfo {
@@ -47,6 +50,7 @@ interface AccountRow {
   updatedAt: number
   credit?: CreditSnapshot
   usage?: UsageSnapshot
+  checkin?: CheckinSnapshot
 }
 
 const message = useMessage()
@@ -121,6 +125,17 @@ const columns: DataTableColumns<AccountRow> = [
     },
   },
   {
+    title: '当日签到状态',
+    key: 'checkin',
+    width: 130,
+    render: (row: AccountRow) => {
+      if (!row.checkin) return h('span', { style: { color: '#999' } }, '未知')
+      return row.checkin.checkedIn
+        ? h('span', { style: { color: '#18a058', fontWeight: '500' } }, '已签到')
+        : h('span', { style: { color: '#f0a020', fontWeight: '500' } }, '未签到')
+    },
+  },
+  {
     title: '更新时间',
     key: 'updatedAt',
     width: 180,
@@ -146,6 +161,7 @@ async function loadAccounts() {
         updatedAt: it.updatedAt,
         credit: extra.credit,
         usage: extra.usage,
+        checkin: uid !== '-' ? getCheckinSnapshot(uid) : null,
       }
     })
   } catch (e: unknown) {
@@ -231,6 +247,154 @@ function formatTime(ts: number | null | undefined): string {
   return new Date(ts).toLocaleString('zh-CN')
 }
 
+// ======== 签到状态 ========
+
+const checkingIn = ref(false)
+
+/**
+ * 当前已加载的账号是否全部已签到
+ * <p>
+ * 没有 checkin 字段的账号视为"未签到"（保守判定，避免误禁）
+ * 没有账号时返回 false（按钮可点击但不会触发任何请求）
+ */
+const allCheckedIn = computed(() => {
+  if (tableData.value.length === 0) return false
+  return tableData.value.every((row) => row.checkin?.checkedIn === true)
+})
+
+/**
+ * 拉取并合并签到状态
+ * <p>
+ * 只请求**没有 checkin 字段的**账号（避免重复请求）
+ * <p>
+ * 后端会按本地 checkin_log 表 + 当日时间窗自动判定，返回 checkedIn
+ */
+async function queryCheckinStatus() {
+  if (tableData.value.length === 0) return
+  const needQuery = tableData.value
+    .filter((r) => !r.checkin && r.id != null)
+    .map((r) => r.id as number)
+  if (needQuery.length === 0) return
+  try {
+    const res = await fetch('/api/checkin/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountIds: needQuery }),
+    })
+    if (!res.ok) {
+      console.warn(`查询签到状态失败: ${res.status}`)
+      return
+    }
+    const body = await res.json()
+    const items: any[] = body?.data || []
+    for (const it of items) {
+      const row = tableData.value.find((r) => r.id === it.accountId)
+      if (!row) continue
+      const snap = it.checkedIn
+        ? {
+            checkedIn: true,
+            checkinTime: it.checkinTime ?? null,
+            checkinType: it.checkinType ?? 'daily',
+          }
+        : { checkedIn: false, checkinTime: null, checkinType: null as any }
+      row.checkin = snap
+      if (row.uid && row.uid !== '-') {
+        setCheckinSnapshot(row.uid, snap)
+      }
+    }
+  } catch (e) {
+    console.warn('查询签到状态异常:', e)
+  }
+}
+
+/**
+ * 一键每日签到
+ * <p>
+ * 收集所有 checkedIn !== true 的账号，串行发往后端 /api/checkin/execute
+ * 结果合并到表格 + 落 localStorage
+ */
+async function oneClickCheckin() {
+  if (checkingIn.value) return
+  const targets = tableData.value
+    .filter((r) => r.checkin?.checkedIn !== true)
+    .map((r) => r.id as number)
+  if (targets.length === 0) {
+    message.info('所有账号今日已签到')
+    return
+  }
+  checkingIn.value = true
+  try {
+    const res = await fetch('/api/checkin/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountIds: targets }),
+    })
+    if (!res.ok) {
+      message.error(`签到请求失败: ${res.status}`)
+      return
+    }
+    const body = await res.json()
+    const results: any[] = body?.data || []
+    let okCount = 0
+    let alreadyCount = 0
+    let errCount = 0
+    // 记录本次"我刚签到成功"的 uid，用于签到后刷积分显示
+    const freshUids: string[] = []
+    for (const r of results) {
+      const row = tableData.value.find((x) => x.id === r.accountId)
+      if (!row) continue
+      const isOk = r.status === 'checked_in' || r.status === 'already_checked_in'
+      if (isOk) {
+        const snap = {
+          checkedIn: true,
+          checkinTime: Date.now(),
+          checkinType: 'daily' as const,
+        }
+        row.checkin = snap
+        if (row.uid && row.uid !== '-') setCheckinSnapshot(row.uid, snap)
+        // 仅收集本次"新签到成功"的 uid（already_checked_in 不刷，因为上游没返新积分）
+        if (r.status === 'checked_in' && row.uid && row.uid !== '-') {
+          freshUids.push(row.uid)
+        }
+        if (r.status === 'checked_in') okCount++
+        else alreadyCount++
+      } else {
+        errCount++
+        message.warning(`账号 ${row.nickname || r.uid} 签到失败: ${r.message || '未知错误'}`)
+      }
+    }
+    const parts: string[] = []
+    if (okCount > 0) parts.push(`成功 ${okCount}`)
+    if (alreadyCount > 0) parts.push(`已签 ${alreadyCount}`)
+    if (errCount > 0) parts.push(`失败 ${errCount}`)
+    message.success(`签到完成: ${parts.join(' / ')}`)
+    // 签到成功后立即刷新本次新签成功账号的积分剩余（不刷已签过的、也不刷失败的）
+    if (freshUids.length > 0) {
+      await refreshCreditForUids(freshUids)
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(`签到异常: ${msg}`)
+  } finally {
+    checkingIn.value = false
+  }
+}
+
+/**
+ * 仅刷新指定 uid 列表的"积分剩余"（user-resource），不刷 usage、不弹全局成功提示
+ * <p>
+ * 用于：一键签到后只对"本次新签到成功"的账号拉最新积分数据，立即看到新加的积分
+ */
+async function refreshCreditForUids(uids: string[]) {
+  if (uids.length === 0) return
+  const tasks = uids.map(async (uid) => {
+    await fetchAndStore(uid, 'credit', `/api/billing/${uid}/user-resource`)
+  })
+  await Promise.allSettled(tasks)
+  // 拉完新积分后，重新从 localStorage + 表格已有数据合成最新 tableData，触发 UI 刷新
+  await loadAccounts()
+}
+
 // ========添加账户 ========
 
 function openChooser() {
@@ -243,6 +407,7 @@ async function loadFromLocal() {
   showChooser.value = false
   showDetail.value = true
   loadingDetail.value = true
+  await queryCheckinStatus()
   detailInfo.value = null
   showAccessToken.value = false
   try {
@@ -366,6 +531,7 @@ async function saveDetail() {
 onMounted(async () => {
   await loadAccounts()
   await refreshExtras()
+  await queryCheckinStatus()
 })
 </script>
 
@@ -385,6 +551,14 @@ onMounted(async () => {
             <Icon name="refresh" :size="14" />
           </template>
           刷新
+        </n-button>
+        <n-button
+          type="warning"
+          :disabled="allCheckedIn || checkingIn"
+          :loading="checkingIn"
+          @click="oneClickCheckin"
+        >
+          一键每日签到
         </n-button>
         <n-button type="primary" @click="openChooser">
           <template #icon>
