@@ -50,3 +50,29 @@ CREATE TABLE IF NOT EXISTS checkin_log (
 
 CREATE INDEX IF NOT EXISTS idx_checkin_log_account_time ON checkin_log(account_id, checkin_time);
 CREATE INDEX IF NOT EXISTS idx_checkin_log_time ON checkin_log(checkin_time);
+
+-- 应用设置表（key-value 结构，value 是 JSON 字符串）
+--
+-- 用途:全局配置项的统一存储位置,例如 "chat.consumption" 保存对话模式的消耗方式
+-- 设计原则:
+--   - key 唯一,采用 "类别.项" 命名(如 "chat.consumption" / "ui.theme" 未来)
+--   - value 用 JSON 序列化,前端直接 JSON.parse 即可
+--   - 不存任何"未知字段",加新设置项不需要改 schema,只需要 PUT 一次就行
+--   - 时间戳用毫秒(跟 workbuddy_account / checkin_log 保持一致)
+--
+-- 字段说明:
+--   id:         自增编号
+--   key:        设置项唯一标识(由业务方定义,如 "chat.consumption")
+--   value:      JSON 字符串,前端负责解析;后端只做字符串透传
+--   created_at: 创建时间(毫秒)
+--   updated_at: 最后更新时间(毫秒)
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    key        TEXT    NOT NULL UNIQUE,
+    value      TEXT    NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_settings_key ON app_settings(key);

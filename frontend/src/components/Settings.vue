@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref, type VNode } from 'vue'
-import { NSelect, NSpin, useMessage, type SelectOption, type SelectGroupOption } from 'naive-ui'
+import { computed, h, onMounted, ref, watch, type VNode } from 'vue'
+import { NSelect, NSpin, NButton, useMessage, type SelectOption, type SelectGroupOption } from 'naive-ui'
 import Icon from './Icon.vue'
 import type { CreditSnapshot } from '../utils/accountExtras'
 import { useAccountData } from '../composables/useAccountData'
@@ -144,8 +144,111 @@ function summarizeCredit(snap: CreditSnapshot | null | undefined): { remain: num
   return { remain, size }
 }
 
-onMounted(() => {
-  loadAccounts()
+// ===== 持久化:从后端拉初始值 + Save 按钮 =====
+
+/**
+ * 后端返回的 chat.consumption 设置项的 value 结构
+ */
+interface ConsumptionSetting {
+  mode: string
+  accountId?: number | null
+}
+
+/**
+ * "上次保存到后端的状态",用作 dirty 比较基准
+ * <p>
+ * null 表示后端从未保存过(首次进入页面),这种情况任何变更都视为 dirty
+ */
+const savedSnapshot = ref<ConsumptionSetting | null>(null)
+const savingSettings = ref(false)
+const settingsLoaded = ref(false)
+
+/** 拉后端当前持久化的设置,作为 dirty 比较基准 */
+async function loadSettings(): Promise<void> {
+  try {
+    const res = await fetch('/api/settings/chat.consumption')
+    if (res.status === 404) {
+      // 后端从未保存过,这是合法情况
+      savedSnapshot.value = null
+      return
+    }
+    if (!res.ok) throw new Error(`status=${res.status}`)
+    const body = (await res.json()) as ConsumptionSetting
+    savedSnapshot.value = body
+    // 把后端的值同步到当前表单(让用户看到"当前生效的设置")
+    if (body.mode && Object.values(MODE).includes(body.mode as ConsumptionMode)) {
+      consumptionMode.value = body.mode as ConsumptionMode
+    }
+    // 无论 mode 是否 designated,都用后端当前值覆写本地 accountId(没有就清空)
+    // 避免上次本地残留的 selectedAccountId 影响本次展示
+    selectedAccountId.value = body.accountId ?? null
+  } catch (e) {
+    console.warn('[Settings] 拉取初始设置失败:', e)
+    // 失败时按"未保存过"处理,让用户能正常操作
+    savedSnapshot.value = null
+  } finally {
+    settingsLoaded.value = true
+  }
+}
+
+/** 点 Save:把当前表单 PUT 到后端 */
+async function saveSettings(): Promise<void> {
+  if (savingSettings.value) return
+  savingSettings.value = true
+  try {
+    const persisted: ConsumptionSetting = consumptionMode.value === MODE.DESIGNATED
+      ? { mode: consumptionMode.value, accountId: selectedAccountId.value ?? null }
+      : { mode: consumptionMode.value, accountId: null }
+
+    const payload = {
+      mode: consumptionMode.value,
+      // 非指定模式时不带 accountId,后端会强制清空
+      ...(consumptionMode.value === MODE.DESIGNATED && selectedAccountId.value != null
+        ? { accountId: selectedAccountId.value }
+        : {}),
+    }
+    const res = await fetch('/api/settings/chat.consumption', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}))
+      throw new Error(errBody?.message || `请求失败: ${res.status}`)
+    }
+    // 读掉响应体即可,UI 以用户当前刚选择的值为准,避免被后端回包 shape 变化/字段缺失打回默认值
+    await res.json().catch(() => null)
+    savedSnapshot.value = persisted
+    // 非指定模式保存后,后端会清空 accountId,本地也立即对齐
+    if (consumptionMode.value !== MODE.DESIGNATED) {
+      selectedAccountId.value = null
+    }
+    message.success('已保存')
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(`保存失败: ${msg}`)
+  } finally {
+    savingSettings.value = false
+  }
+}
+
+/**
+ * 防止后端清空 accountId 后,前端还残留着旧的 selectedAccountId,造成"看着选了但其实没生效"
+ * <p>
+ * 模式切到非指定时立即同步清空;模式切到指定时如果还没选过则不动
+ */
+watch(consumptionMode, (m) => {
+  if (m !== MODE.DESIGNATED) {
+    selectedAccountId.value = null
+  }
+})
+
+onMounted(async () => {
+ //先拿账号列表,再拿后端配置并对齐显示。
+ //这样 mode=designated 且带 accountId 时,下拉框选项已经准备好,不会出现
+ // "先渲染默认值 → 再被后端值覆盖"的闪烁/错位。
+ await loadAccounts()
+ await loadSettings()
 })
 </script>
 
@@ -199,6 +302,23 @@ onMounted(() => {
             <span>当前模式由后端自动选择账号,无需手动指定。</span>
           </div>
         </div>
+      </div>
+
+      <div class="card-footer">
+        <n-button
+          type="primary"
+          :disabled="!settingsLoaded || loadingAccounts"
+          :loading="savingSettings"
+          @click="saveSettings"
+        >
+          保存
+        </n-button>
+        <span v-if="settingsLoaded && savedSnapshot" class="footer-hint">
+          已加载当前配置,点击“保存”将覆写后端设置
+        </span>
+        <span v-else-if="settingsLoaded" class="footer-hint">
+          当前后端尚未保存过该设置
+        </span>
       </div>
     </div>
   </div>
@@ -289,6 +409,26 @@ onMounted(() => {
 
 .form-row-hint .form-control-hint :deep(svg) {
   flex-shrink: 0;
+}
+
+.card-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-top: 1px solid #ececf0;
+  background: #fafbfc;
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+}
+
+.footer-hint {
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.footer-hint-dirty {
+  color: #f0a020;
 }
 
 /* ========== 指定账号下拉项：昵称（credit）单行格式 ========== */
