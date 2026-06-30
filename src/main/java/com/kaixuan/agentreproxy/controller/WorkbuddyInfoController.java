@@ -1,21 +1,29 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.dto.AccountResponse;
+import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
 import com.kaixuan.agentreproxy.model.WorkbuddyDesktopInfo;
+import com.kaixuan.agentreproxy.repository.WorkbuddyAccountJdbcRepository;
 import com.kaixuan.agentreproxy.service.AccountSaveService;
 import com.kaixuan.agentreproxy.service.AccountSaveService.SaveAction;
+import com.kaixuan.agentreproxy.service.AccountSaveService.SaveResult;
 import com.kaixuan.agentreproxy.service.WorkbuddyInfoService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
@@ -30,19 +38,54 @@ public class WorkbuddyInfoController {
 
     private final WorkbuddyInfoService workbuddyInfoService;
     private final AccountSaveService accountSaveService;
+    private final WorkbuddyAccountJdbcRepository accountRepository;
     private final ObjectMapper objectMapper;
 
     public WorkbuddyInfoController(WorkbuddyInfoService workbuddyInfoService,
                                    AccountSaveService accountSaveService,
+                                   WorkbuddyAccountJdbcRepository accountRepository,
                                    ObjectMapper objectMapper) {
         this.workbuddyInfoService = workbuddyInfoService;
         this.accountSaveService = accountSaveService;
+        this.accountRepository = accountRepository;
         this.objectMapper = objectMapper;
     }
 
     @GetMapping("/workbuddy-info")
     public Mono<WorkbuddyDesktopInfo> getWorkbuddyInfo() {
         return Mono.fromCallable(workbuddyInfoService::readInfo);
+    }
+
+    /**
+     * 通过上传的 .info 文件解析账户信息
+     */
+    @PostMapping(value = "/import-info", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Mono<WorkbuddyDesktopInfo> importInfo(@RequestPart("file") FilePart filePart) {
+        return DataBufferUtils.join(filePart.content())
+                .map(buffer -> {
+                    byte[] bytes = new byte[buffer.readableByteCount()];
+                    buffer.read(bytes);
+                    DataBufferUtils.release(buffer);
+                    return new String(bytes, StandardCharsets.UTF_8);
+                })
+                .map(content -> {
+                    try {
+                        return objectMapper.readValue(content, WorkbuddyDesktopInfo.class);
+                    } catch (Exception e) {
+                        throw new IllegalArgumentException("文件解析失败: " + e.getMessage());
+                    }
+                });
+    }
+
+    /**
+     * 查询所有已保存的账户列表
+     */
+    @GetMapping("/accounts")
+    public Mono<Map<String, Object>> listAccounts() {
+        return Mono.fromCallable(() -> {
+            java.util.List<WorkbuddyAccountRecord> records = accountRepository.findAll();
+            return Map.<String, Object>of("data", records);
+        });
     }
 
     /**
@@ -58,11 +101,6 @@ public class WorkbuddyInfoController {
             Object infoNode = raw.containsKey("info") ? raw.get("info") : raw;
             WorkbuddyDesktopInfo info = objectMapper.convertValue(infoNode, WorkbuddyDesktopInfo.class);
 
-            if (info == null || info.account() == null
-                    || info.account().uid() == null || info.account().uid().isBlank()) {
-                throw new IllegalArgumentException("uid 不可为空");
-            }
-
             // 2) 解析 apiKey
             String apiKey = null;
             Object apiKeyNode = raw.get("apiKey");
@@ -70,15 +108,23 @@ public class WorkbuddyInfoController {
                 apiKey = s;
             }
 
-            String accessToken = info.auth() != null ? info.auth().accessToken() : null;
+            String accessToken = info != null && info.auth() != null ? info.auth().accessToken() : null;
             boolean hasAccess = accessToken != null && !accessToken.isBlank();
             boolean hasApi = apiKey != null && !apiKey.isBlank();
             if (!hasAccess && !hasApi) {
                 throw new IllegalArgumentException("accessToken 与 apiKey 至少需要存在一个");
             }
 
+            // 3) 解析 UID：可能为空
+            String uid = (info != null && info.account() != null) ? info.account().uid() : null;
+            if (uid == null || uid.isBlank()) {
+                // 没有 UID 时使用凭证的 SHA-256 前 16 位作为稳定指纹
+                String seed = hasApi ? "apikey:" + apiKey : "accesstoken:" + accessToken;
+                uid = "manual-" + sha256Short(seed);
+            }
+
             String json = objectMapper.writeValueAsString(info);
-            return accountSaveService.save(info.account().uid(), json, hasAccess ? accessToken : null, hasApi ? apiKey : null);
+            return accountSaveService.save(uid, json, hasAccess ? accessToken : null, hasApi ? apiKey : null);
         }).flatMap(result -> {
             if (result.action() == SaveAction.DUPLICATE) {
                 return Mono.error(new DuplicateAccountException(result.response()));
@@ -88,6 +134,20 @@ public class WorkbuddyInfoController {
                 "status", result.action().name().toLowerCase(),
                 "data", result.response()
         ));
+    }
+
+    private static String sha256Short(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (int i = 0; i < 8 && i < digest.length; i++) {
+                hex.append(String.format("%02x", digest[i]));
+            }
+            return hex.toString();
+        } catch (Exception e) {
+            return Integer.toHexString(input.hashCode());
+        }
     }
 
     /** 409: UID + 凭证集 已存在 */
