@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { NButton, NModal, NCard, NDescriptions, NDescriptionsItem, NSpin, useMessage } from 'naive-ui'
+import { NButton, NModal, NCard, NDescriptions, NDescriptionsItem, NSpin, NSpace, useMessage } from 'naive-ui'
 
 interface WorkbuddyInfo {
   account: {
@@ -23,6 +23,7 @@ interface WorkbuddyInfo {
 
 const showModal = ref(false)
 const loading = ref(false)
+const saving = ref(false)
 const info = ref<WorkbuddyInfo | null>(null)
 const message = useMessage()
 
@@ -39,6 +40,41 @@ async function fetchInfo() {
     showModal.value = false
   } finally {
     loading.value = false
+  }
+}
+
+function handleCancel() {
+  showModal.value = false
+  info.value = null
+}
+
+async function handleSave() {
+  if (!info.value) return
+  saving.value = true
+  try {
+    const res = await fetch('/api/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(info.value),
+    })
+    const body = await res.json().catch(() => ({}))
+    if (res.ok) {
+      const status = body.status as string
+      const text = status === 'created' ? '新建成功' : status === 'updated' ? '已覆盖旧记录' : '保存成功'
+      message.success(text)
+      showModal.value = false
+      info.value = null
+    } else if (res.status === 409) {
+      message.warning('该账户信息已存在且未发生变化，无需重复保存')
+    } else {
+      const msg = body?.message || `请求失败: ${res.status}`
+      message.error(`保存失败: ${msg}`)
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(`保存失败: ${msg}`)
+  } finally {
+    saving.value = false
   }
 }
 
@@ -86,6 +122,15 @@ function maskToken(token: string): string {
           </n-card>
         </template>
       </n-spin>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="handleCancel" :disabled="saving">取消</n-button>
+          <n-button type="primary" :loading="saving" :disabled="!info || loading" @click="handleSave">
+            保存
+          </n-button>
+        </n-space>
+      </template>
     </n-modal>
   </div>
 </template>

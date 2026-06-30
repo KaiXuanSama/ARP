@@ -38,6 +38,13 @@ frontend/node/
 frontend/dist/
 src/main/resources/static/
 
+### SQLite database ###
+agentreproxy.db
+agentreproxy.db-journal
+*.db
+*.db-journal
+data/
+
 ### Runtime configuration ###
 application.yml
 
