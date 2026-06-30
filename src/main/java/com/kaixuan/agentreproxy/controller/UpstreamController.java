@@ -1,10 +1,12 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.constants.SupportedModels;
+import com.kaixuan.agentreproxy.service.BillingQueryService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -25,38 +27,31 @@ import java.util.Map;
 public class UpstreamController {
 
     private final UpstreamClient upstream;
+    private final BillingQueryService billingQueryService;
 
-    public UpstreamController(UpstreamClient upstream) {
+    public UpstreamController(UpstreamClient upstream, BillingQueryService billingQueryService) {
         this.upstream = upstream;
+        this.billingQueryService = billingQueryService;
     }
 
     // ============== Billing ==============
-    // 注：上游 Billing 端点可能在 HTTP 400 携带业务码（如 10001 已签到），
-    //     UpstreamClient 已配置 4xx 透传 body，这里再把状态码一并透传给前端
+    // 真实接口（来自官方页面抓包）：
+    //   get-user-resource        资源包列表（Cycle*Precise 周期内精确值）
+    //   get-user-request-usage   时段用量明细（含 total）
+    // 注：上游 Billing 端点可能在 HTTP 400 携带业务码，UpstreamClient 已配置 4xx 透传 body
+    // 路径变量 {uid} 标记数据归属，调用后会被记录到该账户的 extra 字段中
 
-    @PostMapping("/billing/user-resource")
-    public Mono<ResponseEntity<Map<String, Object>>> getUserResource() {
-        return upstream.postBilling("/v2/billing/meter/get-user-resource");
+    @PostMapping("/billing/{uid}/user-resource")
+    public Mono<ResponseEntity<Map<String, Object>>> getUserResource(@PathVariable String uid) {
+        return billingQueryService.queryCredit(uid);
     }
 
-    @PostMapping("/billing/checkin-status")
-    public Mono<ResponseEntity<Map<String, Object>>> checkinStatus() {
-        return upstream.postBilling("/v2/billing/meter/checkin-status");
-    }
-
-    @PostMapping("/billing/daily-checkin")
-    public Mono<ResponseEntity<Map<String, Object>>> dailyCheckin() {
-        return upstream.postBilling("/v2/billing/meter/daily-checkin");
-    }
-
-    @PostMapping("/billing/payment-type")
-    public Mono<ResponseEntity<Map<String, Object>>> getPaymentType() {
-        return upstream.postBilling("/v2/billing/meter/get-payment-type");
-    }
-
-    @PostMapping("/billing/dosage-notify")
-    public Mono<ResponseEntity<Map<String, Object>>> getDosageNotify() {
-        return upstream.postBilling("/v2/billing/meter/get-dosage-notify");
+    @PostMapping("/billing/{uid}/user-request-usage")
+    public Mono<ResponseEntity<Map<String, Object>>> getUserRequestUsage(
+            @PathVariable String uid,
+            @RequestBody(required = false) com.kaixuan.agentreproxy.dto.UsageQueryRequest req
+    ) {
+        return billingQueryService.queryUsage(uid, req);
     }
 
     // ============== Chat ==============

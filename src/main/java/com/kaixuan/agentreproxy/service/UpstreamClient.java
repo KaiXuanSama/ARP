@@ -46,11 +46,34 @@ public class UpstreamClient {
      * @param path 上游路径，例如 /v2/billing/meter/get-user-resource
      */
     public Mono<org.springframework.http.ResponseEntity<Map<String, Object>>> postBilling(String path) {
-        return workbuddyInfoService.getAccountInfoSafely()
-                .flatMap(info -> webClient.post()
+        return postBillingJson(path, Map.of());
+    }
+
+    /**
+     * 调用 Billing 类端点（POST 自定义 body）
+     * <p>
+     * 4xx 也读取 body 透传，不抛异常——上游常用 HTTP 400 携带业务码
+     */
+    public Mono<org.springframework.http.ResponseEntity<Map<String, Object>>> postBillingJson(String path, Map<String, Object> body) {
+        return postBillingJsonWithInfo(path, body, null);
+    }
+
+    /**
+     * 调用 Billing 类端点（POST 自定义 body），使用外部传入的账户信息
+     * <p>
+     * 如果 info 为 null，则回退到本机配置文件
+     */
+    public Mono<org.springframework.http.ResponseEntity<Map<String, Object>>> postBillingJsonWithInfo(
+            String path, Map<String, Object> body, WorkbuddyDesktopInfo info
+    ) {
+        Mono<WorkbuddyDesktopInfo> infoMono = info != null
+                ? Mono.just(info)
+                : workbuddyInfoService.getAccountInfoSafely();
+        return infoMono
+                .flatMap(actualInfo -> webClient.post()
                         .uri(UpstreamConstants.BILLING_BASE_URL + path)
-                        .headers(h -> applyAuth(h, info))
-                        .bodyValue(Map.of())
+                        .headers(h -> applyAuth(h, actualInfo))
+                        .bodyValue(body)
                         .retrieve()
                         .onStatus(s -> true, resp -> reactor.core.publisher.Mono.empty())
                         .toEntity(MAP_TYPE)

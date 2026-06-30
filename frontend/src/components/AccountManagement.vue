@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { h, onMounted, ref } from 'vue'
 import {
   NButton, NModal, NCard, NDescriptions, NDescriptionsItem,
   NSpin, NSpace, NDataTable, NInput, NUpload, useMessage,
   type DataTableColumns, type UploadFileInfo
 } from 'naive-ui'
 import Icon from './Icon.vue'
+import {
+  getAccountExtra,
+  mergeAccountExtra,
+  type CreditSnapshot,
+  type UsageSnapshot,
+} from '../utils/accountExtras'
 
 interface WorkbuddyInfo {
   account?: {
@@ -35,40 +41,46 @@ interface AccountRow {
   id: number
   uid: string
   nickname: string
-  primaryCredential: string  // 优先 APIKey，否则 Access Token（脱敏）
+  primaryCredential: string
+  apiKey: string | null
+  accessToken: string | null
   updatedAt: number
+  credit?: CreditSnapshot
+  usage?: UsageSnapshot
 }
 
 const message = useMessage()
 
-// ===== 主弹窗：三入口选择 =====
+// =====凭证详情弹窗 =====
+const showCredentialModal = ref(false)
+const credentialRow = ref<AccountRow | null>(null)
+
+function openCredentialDetail(row: AccountRow) {
+  credentialRow.value = row
+  showCredentialModal.value = true
+}
+
+// =====主弹窗：三入口选择 =====
 const showChooser = ref(false)
 
-// ===== 本机 / 文件导入 详情弹窗 =====
+// =====本机 /文件导入详情弹窗 =====
 const showDetail = ref(false)
 const loadingDetail = ref(false)
 const savingDetail = ref(false)
 const detailInfo = ref<WorkbuddyInfo | null>(null)
 const showAccessToken = ref(false)
 
-// ===== 手动输入 API Key 弹窗 =====
+// =====手动输入 API Key弹窗 =====
 const showApiKeyForm = ref(false)
 const apiKeyForm = ref<ApiKeyOnlyPayload>({ nickname: '', apiKey: '' })
 const savingApiKey = ref(false)
 
-// ===== 表格 =====
+// =====表格 =====
 const searchKeyword = ref('')
 const tableData = ref<AccountRow[]>([])
 
 const columns: DataTableColumns<AccountRow> = [
   { title: '编号', key: 'id', width: 70 },
-  {
-    title: 'UID',
-    key: 'uid',
-    ellipsis: { tooltip: true },
-    width: 240,
-    render: (row) => row.uid || '-',
-  },
   {
     title: '昵称',
     key: 'nickname',
@@ -79,7 +91,34 @@ const columns: DataTableColumns<AccountRow> = [
     title: '凭证',
     key: 'credentials',
     width: 220,
-    render: (row) => row.primaryCredential,
+    render: (row: AccountRow) => {
+      return h(NButton, {
+        quaternary: true,
+        size: 'tiny',
+        style: { fontFamily: "'SFMono-Regular',Consolas,'Liberation Mono',monospace", fontSize: '12px' },
+        onClick: () => openCredentialDetail(row),
+      }, () => row.primaryCredential || '-')
+    },
+  },
+  {
+    title: '积分剩余',
+    key: 'creditRemain',
+    width: 140,
+    render: (row: AccountRow) => {
+      if (!row.credit || !Array.isArray(row.credit.packages)) return '-'
+      const remain = row.credit.packages.reduce((s, p) => s + (p.cycleCapacityRemain || 0), 0)
+      const size = row.credit.packages.reduce((s, p) => s + (p.cycleCapacitySize || 0), 0)
+      return `${remain.toFixed(1)} / ${size.toFixed(0)}`
+    },
+  },
+  {
+    title: '本期消耗',
+    key: 'usage',
+    width: 110,
+    render: (row: AccountRow) => {
+      if (!row.usage) return '-'
+      return `${row.usage.total.toFixed(2)}积分`
+    },
   },
   {
     title: '更新时间',
@@ -89,22 +128,75 @@ const columns: DataTableColumns<AccountRow> = [
   },
 ]
 
-// ============= 列表 =============
 async function loadAccounts() {
   try {
     const res = await fetch('/api/accounts')
     if (!res.ok) throw new Error(`加载失败: ${res.status}`)
     const body = await res.json()
-    tableData.value = (body.data || []).map((it: any) => ({
-      id: it.id,
-      uid: it.uid || '-',
-      nickname: extractNickname(it.accountJson),
-      primaryCredential: pickPrimaryCredential(it.apiKey, it.accessToken),
-      updatedAt: it.updatedAt,
-    }))
+    tableData.value = (body.data || []).map((it: any) => {
+      const uid = it.uid || '-'
+      const extra = uid !== '-' ? getAccountExtra(uid) : {}
+      return {
+        id: it.id,
+        uid,
+        nickname: extractNickname(it.accountJson),
+        primaryCredential: pickPrimaryCredential(it.apiKey, it.accessToken),
+        apiKey: it.apiKey || null,
+        accessToken: it.accessToken || null,
+        updatedAt: it.updatedAt,
+        credit: extra.credit,
+        usage: extra.usage,
+      }
+    })
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : '未知错误'
     message.error(msg)
+  }
+}
+
+async function refreshExtras() {
+  if (tableData.value.length === 0) {
+    await loadAccounts()
+    return
+  }
+  const tasks = tableData.value
+    .filter((row) => row.uid && row.uid !== '-')
+    .map(async (row) => {
+      await Promise.allSettled([
+        fetchAndStore(row.uid, 'credit', `/api/billing/${row.uid}/user-resource`),
+        fetchAndStore(row.uid, 'usage', `/api/billing/${row.uid}/user-request-usage`, {
+          startTime: '2026-06-23 00:00:00',
+          endTime: '2026-06-30 23:59:59',
+          pageNum: 1,
+          pageSize: 50,
+        }),
+      ])
+    })
+  await Promise.allSettled(tasks)
+  await loadAccounts()
+  message.success('积分、用量信息已刷新')
+}
+
+async function fetchAndStore(
+  uid: string,
+  key: 'credit' | 'usage',
+  url: string,
+  bodyObj?: Record<string, unknown>
+) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj ?? {}),
+    })
+    if (!res.ok) return
+    const body = await res.json()
+    const snapshot = body?.extra?.[key]
+    if (snapshot && typeof snapshot === 'object') {
+      mergeAccountExtra(uid, key, snapshot)
+    }
+  } catch (e) {
+    console.warn(`刷新 ${uid}的 ${key}失败:`, e)
   }
 }
 
@@ -118,14 +210,9 @@ function extractNickname(json: string): string {
   }
 }
 
-/** 优先 API Key，否则 Access Token；都做脱敏 */
 function pickPrimaryCredential(apiKey?: string | null, accessToken?: string | null): string {
-  if (apiKey && apiKey.trim()) {
-    return `APIKey  ${maskToken(apiKey)}`
-  }
-  if (accessToken && accessToken.trim()) {
-    return `Access  ${maskToken(accessToken)}`
-  }
+  if (apiKey && apiKey.trim()) return `APIKey ${maskToken(apiKey)}`
+  if (accessToken && accessToken.trim()) return `Access ${maskToken(accessToken)}`
   return '-'
 }
 
@@ -135,15 +222,19 @@ function maskToken(token: string): string {
   return token.slice(0, 6) + '…' + token.slice(-4)
 }
 
-// ============= 添加账户：三入口 =============
+function formatTime(ts: number | null | undefined): string {
+  if (!ts) return '-'
+  return new Date(ts).toLocaleString('zh-CN')
+}
+
+// ========添加账户 ========
+
 function openChooser() {
   showChooser.value = true
-  // 重置任何残留状态
   detailInfo.value = null
   apiKeyForm.value = { nickname: '', apiKey: '' }
 }
 
-// ===== 入口 1：本机获取 =====
 async function loadFromLocal() {
   showChooser.value = false
   showDetail.value = true
@@ -163,7 +254,6 @@ async function loadFromLocal() {
   }
 }
 
-// ===== 入口 2：文件导入 =====
 async function handleFileUpload({ file }: { file: UploadFileInfo }) {
   if (!file.file) return false
   showChooser.value = false
@@ -187,10 +277,9 @@ async function handleFileUpload({ file }: { file: UploadFileInfo }) {
   } finally {
     loadingDetail.value = false
   }
-  return false  // 阻止 n-upload 默认上传
+  return false
 }
 
-// ===== 入口 3：手动输入 API Key =====
 function openApiKeyForm() {
   showChooser.value = false
   apiKeyForm.value = { nickname: '', apiKey: '' }
@@ -221,7 +310,7 @@ async function saveApiKeyOnly() {
       showApiKeyForm.value = false
       await loadAccounts()
     } else if (res.status === 409) {
-      message.warning('该 API Key 已存在，未发生变化，无需重复保存')
+      message.warning('该 API Key已存在，未发生变化，无需重复保存')
     } else {
       const msg = body?.message || `请求失败: ${res.status}`
       message.error(`保存失败: ${msg}`)
@@ -234,7 +323,6 @@ async function saveApiKeyOnly() {
   }
 }
 
-// ============= 本机/文件 详情：保存 =============
 function cancelDetail() {
   showDetail.value = false
   detailInfo.value = null
@@ -271,27 +359,24 @@ async function saveDetail() {
   }
 }
 
-function formatTime(ts: number | null | undefined): string {
-  if (!ts) return '-'
-  return new Date(ts).toLocaleString('zh-CN')
-}
-
-onMounted(loadAccounts)
+onMounted(async () => {
+  await loadAccounts()
+  await refreshExtras()
+})
 </script>
 
 <template>
   <div class="page">
-    <!-- 工具栏 -->
     <div class="toolbar">
       <div class="toolbar-left">
-        <n-input v-model:value="searchKeyword" placeholder="搜索 UID / 昵称" clearable style="width: 240px">
+        <n-input v-model:value="searchKeyword" placeholder="搜索昵称" clearable style="width:240px">
           <template #prefix>
             <Icon name="search" :size="14" />
           </template>
         </n-input>
       </div>
       <div class="toolbar-right">
-        <n-button quaternary @click="loadAccounts">
+        <n-button quaternary @click="refreshExtras">
           <template #icon>
             <Icon name="refresh" :size="14" />
           </template>
@@ -306,20 +391,31 @@ onMounted(loadAccounts)
       </div>
     </div>
 
-    <!-- 表格 -->
     <n-card :bordered="false" class="table-card">
-      <n-data-table
-        :columns="columns"
-        :data="tableData"
-        :bordered="false"
-        :single-line="false"
-        size="small"
-        :row-key="(row: AccountRow) => row.id"
-      />
+      <n-data-table :columns="columns" :data="tableData" :bordered="false" :single-line="false" size="small"
+        :row-key="(row: AccountRow) => row.id" />
     </n-card>
 
-    <!-- ============== 弹窗 1：三入口选择 ============== -->
-    <n-modal v-model:show="showChooser" preset="card" title="添加账户" style="width: 520px;">
+    <!--凭证详情弹窗 -->
+    <n-modal v-model:show="showCredentialModal" preset="card" title="凭证详情" style="width:600px;">
+      <n-descriptions label-placement="left" bordered :column="1" size="small">
+        <n-descriptions-item label="昵称">{{ credentialRow?.nickname || '未定义' }}</n-descriptions-item>
+        <n-descriptions-item label="API Key">
+          <code style="word-break: break-all; font-size:12px;">{{ credentialRow?.apiKey || '-' }}</code>
+        </n-descriptions-item>
+        <n-descriptions-item label="Access Token">
+          <code style="word-break: break-all; font-size:12px;">{{ credentialRow?.accessToken || '-' }}</code>
+        </n-descriptions-item>
+      </n-descriptions>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showCredentialModal = false">关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!--三入口选择 -->
+    <n-modal v-model:show="showChooser" preset="card" title="添加账户" style="width:520px;">
       <div class="entry-list">
         <button class="entry-item" type="button" @click="loadFromLocal">
           <div class="entry-icon">
@@ -327,42 +423,34 @@ onMounted(loadAccounts)
           </div>
           <div class="entry-body">
             <div class="entry-title">本机获取</div>
-            <div class="entry-desc">读取本机 CodeBuddy 已登录的账户信息</div>
+            <div class="entry-desc">读取本机 CodeBuddy已登录的账户信息</div>
           </div>
         </button>
-
-        <n-upload
-          ref="uploadRef"
-          accept=".info,application/json"
-          :show-file-list="false"
-          :custom-request="undefined"
-          @before-upload="handleFileUpload"
-        >
+        <n-upload accept=".info,application/json" :show-file-list="false" @before-upload="handleFileUpload">
           <button class="entry-item" type="button">
             <div class="entry-icon">
               <Icon name="refresh" :size="20" />
             </div>
             <div class="entry-body">
               <div class="entry-title">文件导入</div>
-              <div class="entry-desc">选择一个 workbuddy-desktop.info 文件</div>
+              <div class="entry-desc">选择一个 workbuddy-desktop.info文件</div>
             </div>
           </button>
         </n-upload>
-
         <button class="entry-item" type="button" @click="openApiKeyForm">
           <div class="entry-icon">
             <Icon name="settings" :size="20" />
           </div>
           <div class="entry-body">
             <div class="entry-title">手动输入 API Key</div>
-            <div class="entry-desc">仅填写昵称与 API Key 创建账户</div>
+            <div class="entry-desc">仅填写昵称与 API Key创建账户</div>
           </div>
         </button>
       </div>
     </n-modal>
 
-    <!-- ============== 弹窗 2：本机/文件详情 ============== -->
-    <n-modal v-model:show="showDetail" preset="card" title="账户详情" style="width: 640px;">
+    <!--本机/文件详情 -->
+    <n-modal v-model:show="showDetail" preset="card" title="账户详情" style="width:640px;">
       <n-spin :show="loadingDetail">
         <template v-if="detailInfo">
           <n-card title="账户信息" size="small" :bordered="false" class="info-card">
@@ -372,62 +460,48 @@ onMounted(loadAccounts)
               <n-descriptions-item label="UIN">{{ detailInfo.account?.uin || '-' }}</n-descriptions-item>
               <n-descriptions-item label="类型">{{ detailInfo.account?.type || '-' }}</n-descriptions-item>
               <n-descriptions-item label="手机号">{{ detailInfo.account?.phoneNumber || '-' }}</n-descriptions-item>
-              <n-descriptions-item label="插件启用">{{ detailInfo.account?.pluginEnabled ? '是' : '否' }}</n-descriptions-item>
+              <n-descriptions-item label="插件启用">{{ detailInfo.account?.pluginEnabled ? '是' : '否'
+                }}</n-descriptions-item>
             </n-descriptions>
           </n-card>
-
           <n-card title="凭证信息" size="small" :bordered="false" class="info-card">
             <n-descriptions label-placement="left" bordered :column="1" size="small">
-              <n-descriptions-item label="凭证类型">
-                {{ detailInfo.auth?.accessToken ? 'AccessToken (JWT)' : '-' }}
-              </n-descriptions-item>
+              <n-descriptions-item label="凭证类型">{{ detailInfo.auth?.accessToken ? 'AccessToken (JWT)' : '-'
+                }}</n-descriptions-item>
               <n-descriptions-item label="Access Token">
                 <span class="token-cell">
                   <code>{{ showAccessToken ? detailInfo.auth?.accessToken : maskToken(detailInfo.auth?.accessToken || '') }}</code>
-                  <button
-                    v-if="detailInfo.auth?.accessToken"
-                    class="eye-btn"
-                    type="button"
-                    @click="showAccessToken = !showAccessToken"
-                    :title="showAccessToken ? '隐藏' : '显示'"
-                  >
+                  <button v-if="detailInfo.auth?.accessToken" class="eye-btn" type="button"
+                    @click="showAccessToken = !showAccessToken">
                     <Icon :name="showAccessToken ? 'eye-off' : 'eye'" :size="14" />
                   </button>
                 </span>
               </n-descriptions-item>
               <n-descriptions-item label="域名">{{ detailInfo.auth?.domain || '-' }}</n-descriptions-item>
               <n-descriptions-item label="作用域">{{ detailInfo.auth?.scope || '-' }}</n-descriptions-item>
-              <n-descriptions-item label="Token 过期">{{ formatTime(detailInfo.auth?.expiresAt) }}</n-descriptions-item>
+              <n-descriptions-item label="Token过期">{{ formatTime(detailInfo.auth?.expiresAt) }}</n-descriptions-item>
             </n-descriptions>
           </n-card>
         </template>
       </n-spin>
-
       <template #footer>
         <n-space justify="end">
           <n-button @click="cancelDetail" :disabled="savingDetail">取消</n-button>
-          <n-button type="primary" :loading="savingDetail" :disabled="!detailInfo || loadingDetail" @click="saveDetail">
-            保存
-          </n-button>
+          <n-button type="primary" :loading="savingDetail" :disabled="!detailInfo || loadingDetail"
+            @click="saveDetail">保存</n-button>
         </n-space>
       </template>
     </n-modal>
 
-    <!-- ============== 弹窗 3：手动输入 API Key ============== -->
-    <n-modal v-model:show="showApiKeyForm" preset="card" title="手动输入 API Key" style="width: 480px;">
+    <!--手动输入 API Key -->
+    <n-modal v-model:show="showApiKeyForm" preset="card" title="手动输入 API Key" style="width:480px;">
       <n-form-item label="昵称（可选）" label-placement="top" :show-feedback="false">
         <n-input v-model:value="apiKeyForm.nickname" placeholder="留空则不设置昵称" clearable />
       </n-form-item>
       <n-form-item label="API Key" label-placement="top" :show-feedback="false" required>
-        <n-input
-          v-model:value="apiKeyForm.apiKey"
-          placeholder="请输入 API Key"
-          type="password"
-          show-password-on="click"
-          clearable
-        />
+        <n-input v-model:value="apiKeyForm.apiKey" placeholder="请输入 API Key" type="password" show-password-on="click"
+          clearable />
       </n-form-item>
-
       <template #footer>
         <n-space justify="end">
           <n-button @click="showApiKeyForm = false" :disabled="savingApiKey">取消</n-button>
@@ -451,6 +525,7 @@ onMounted(loadAccounts)
   justify-content: space-between;
   gap: 12px;
 }
+
 .toolbar-right {
   display: flex;
   gap: 8px;
@@ -461,21 +536,22 @@ onMounted(loadAccounts)
   border-radius: 8px;
 }
 
-/* 三入口选择 */
 .entry-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-/* 让 n-upload 触发器与本机/手动输入按钮等宽 */
+
 .entry-list :deep(.n-upload) {
   display: block;
   width: 100%;
 }
+
 .entry-list :deep(.n-upload-trigger) {
   display: block;
   width: 100%;
 }
+
 .entry-item {
   display: flex;
   align-items: center;
@@ -485,15 +561,17 @@ onMounted(loadAccounts)
   background: #fafbfc;
   border: 1px solid #ececf0;
   border-radius: 8px;
-  padding: 14px 16px;
+  padding: 14px16px;
   cursor: pointer;
   font-family: inherit;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background .12s ease, border-color .12s ease;
 }
+
 .entry-item:hover {
   background: #f2f3f5;
   border-color: #d9dadd;
 }
+
 .entry-icon {
   width: 36px;
   height: 36px;
@@ -505,32 +583,34 @@ onMounted(loadAccounts)
   justify-content: center;
   flex-shrink: 0;
 }
+
 .entry-body {
   flex: 1;
   min-width: 0;
 }
+
 .entry-title {
   font-size: 14px;
   font-weight: 500;
   color: #1f2329;
   margin-bottom: 2px;
 }
+
 .entry-desc {
   font-size: 12px;
   color: #8c8c8c;
 }
 
-/* 详情卡片 */
 .info-card {
   background: #fafbfc;
   border-radius: 6px;
   margin-bottom: 12px;
 }
+
 .info-card:last-child {
   margin-bottom: 0;
 }
 
-/* Token 显示 */
 .token-cell {
   display: inline-flex;
   align-items: center;
@@ -539,17 +619,19 @@ onMounted(loadAccounts)
   font-size: 12px;
   word-break: break-all;
 }
+
 .eye-btn {
   background: transparent;
   border: 1px solid #ececf0;
   border-radius: 4px;
-  padding: 2px 4px;
+  padding: 2px4px;
   cursor: pointer;
   color: #4e5969;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
+
 .eye-btn:hover {
   background: #f2f3f5;
 }

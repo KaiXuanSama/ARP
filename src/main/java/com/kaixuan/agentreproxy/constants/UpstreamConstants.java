@@ -17,5 +17,14 @@ public final class UpstreamConstants {
     /** JWT 模式下的 Domain 头 */
     public static final String JWT_DOMAIN = "www.codebuddy.cn";
 
+    // ============== 上游路径常量 ==============
+    // 重要：所有 Billing 端点路径都不带 /v2 前缀
+    //      （Antigravity 文档里都标了但容易遗漏，已通过抓包验证）
+
+    /** 资源包列表 */
+    public static final String PATH_USER_RESOURCE = "/billing/meter/get-user-resource";
+    /** 时段用量明细（带 total） */
+    public static final String PATH_USER_REQUEST_USAGE = "/billing/meter/get-user-request-usage";
+
     private UpstreamConstants() {}
 }

@@ -61,4 +61,14 @@ public class WorkbuddyAccountJdbcRepository {
                         "updated_at = (strftime('%s', 'now') * 1000) WHERE uid = ?",
                 accountJson, accessToken, apiKey, uid);
     }
+
+    /**
+     * 仅覆写 extra 字段（用于缓存账户的 Billing/Checkin 等扩展数据）
+     */
+    public int updateExtraByUid(String uid, String extra) {
+        return jdbcTemplate.update(
+                "UPDATE workbuddy_account SET extra = ?, " +
+                        "updated_at = (strftime('%s', 'now') * 1000) WHERE uid = ?",
+                extra, uid);
+    }
 }
