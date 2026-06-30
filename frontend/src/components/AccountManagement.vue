@@ -565,7 +565,7 @@ onMounted(async () => {
   background: #fafbfc;
   border: 1px solid #ececf0;
   border-radius: 8px;
-  padding: 14px16px;
+  padding: 14px 16px;
   cursor: pointer;
   font-family: inherit;
   transition: background .12s ease, border-color .12s ease;
@@ -628,7 +628,7 @@ onMounted(async () => {
   background: transparent;
   border: 1px solid #ececf0;
   border-radius: 4px;
-  padding: 2px4px;
+  padding: 2px 4px;
   cursor: pointer;
   color: #4e5969;
   display: inline-flex;
