@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import Icon from './Icon.vue'
 
 interface NavItem {
@@ -7,37 +8,38 @@ interface NavItem {
   label: string
   icon: 'home' | 'user' | 'settings'
   disabled?: boolean
+  to: string
 }
 
 const navItems: NavItem[] = [
-  { key: 'accounts', label: '账号管理', icon: 'user' },
-  { key: 'overview', label: '概览', icon: 'home', disabled: true },
-  { key: 'settings', label: '系统设置', icon: 'settings', disabled: true },
+  { key: 'overview', label: '概览', icon: 'home', to: '/overview' },
+  { key: 'accounts', label: '账号管理', icon: 'user', to: '/accounts' },
+  { key: 'settings', label: '系统设置', icon: 'settings', to: '/settings' },
 ]
 
-const activeKey = ref<string>('accounts')
-const collapsed = ref(false)
+const route = useRoute()
+const router = useRouter()
 
-function selectItem(item: NavItem) {
+const activeKey = computed<string>(() => (route.name as string) ?? 'accounts')
+
+const crumbTitle = computed<string>(() => (route.meta?.title as string) ?? '账号管理')
+const crumbSub = computed<string>(() => (route.meta?.sub as string) ?? '')
+
+function go(item: NavItem) {
   if (item.disabled) return
-  activeKey.value = item.key
-  emit('change', item.key)
+  router.push(item.to)
 }
-
-const emit = defineEmits<{
-  (e: 'change', key: string): void
-}>()
 </script>
 
 <template>
-  <div class="layout" :class="{ 'is-collapsed': collapsed }">
+  <div class="layout">
     <!-- 侧边栏 -->
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">
           <Icon name="logo" :size="20" />
         </div>
-        <span v-show="!collapsed" class="brand-text">AgentreProxy</span>
+        <span class="brand-text">AgentreProxy</span>
       </div>
 
       <nav class="nav">
@@ -50,27 +52,21 @@ const emit = defineEmits<{
             'is-disabled': item.disabled,
           }"
           :disabled="item.disabled"
-          @click="selectItem(item)"
+          @click="go(item)"
         >
           <Icon :name="item.icon" :size="18" />
-          <span v-show="!collapsed" class="nav-label">{{ item.label }}</span>
-          <span v-if="!collapsed && item.disabled" class="nav-tag">稍后</span>
+          <span class="nav-label">{{ item.label }}</span>
+          <span v-if="item.disabled" class="nav-tag">稍后</span>
         </button>
       </nav>
-
-      <div class="sidebar-foot">
-        <button class="collapse-btn" @click="collapsed = !collapsed" :title="collapsed ? '展开' : '收起'">
-          <Icon name="logout" :size="16" :style="{ transform: collapsed ? 'rotate(180deg)' : '' }" />
-        </button>
-      </div>
     </aside>
 
     <!-- 主区 -->
     <div class="main">
       <header class="topbar">
         <div class="crumb">
-          <span class="crumb-title">账号管理</span>
-          <span class="crumb-sub">管理 CodeBuddy 账户与凭证</span>
+          <span class="crumb-title">{{ crumbTitle }}</span>
+          <span class="crumb-sub">{{ crumbSub }}</span>
         </div>
         <div class="topbar-right">
           <span class="user-chip">管理员</span>
@@ -101,10 +97,6 @@ const emit = defineEmits<{
   border-right: 1px solid #ececf0;
   display: flex;
   flex-direction: column;
-  transition: width 0.2s ease;
-}
-.is-collapsed .sidebar {
-  width: 64px;
 }
 
 .brand {
@@ -187,27 +179,6 @@ const emit = defineEmits<{
   background: #f2f3f5;
   padding: 1px 6px;
   border-radius: 3px;
-}
-
-.sidebar-foot {
-  padding: 12px;
-  border-top: 1px solid #f0f0f3;
-}
-.collapse-btn {
-  width: 100%;
-  height: 32px;
-  border: 1px solid #ececf0;
-  background: #fff;
-  border-radius: 6px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #4e5969;
-  transition: background 0.12s ease;
-}
-.collapse-btn:hover {
-  background: #f2f3f5;
 }
 
 /* Main */
