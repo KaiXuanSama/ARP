@@ -60,9 +60,6 @@ const savingApiKey = ref(false)
 const searchKeyword = ref('')
 const tableData = ref<AccountRow[]>([])
 
-// 上传组件 ref
-const uploadRef = ref<InstanceType<typeof NUpload> | null>(null)
-
 const columns: DataTableColumns<AccountRow> = [
   { title: '编号', key: 'id', width: 70 },
   {
