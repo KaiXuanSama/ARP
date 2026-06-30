@@ -27,6 +27,7 @@ import {
   mergeAccountExtra,
   getCheckinSnapshot,
   setCheckinSnapshot,
+  isCheckinSnapshotFromToday,
   type CachedAccount,
   type CreditSnapshot,
   type UsageSnapshot,
@@ -231,9 +232,9 @@ async function refreshOne(uid: string): Promise<void> {
 
 async function fetchCheckinStatus(): Promise<void> {
   if (accounts.value.length === 0) return
-  // 只请求"还没有 checkin 快照"的账号(避免每次都重拉)
+  // 只请求"还没拉过 / 缓存已跨日"的账号(避免每次都重拉,也避免把昨天的快照当成今天的状态)
   const needQuery = accounts.value
-    .filter((a) => getCheckinSnapshot(a.uid) === null)
+    .filter((a) => !isCheckinSnapshotFromToday(getCheckinSnapshot(a.uid)))
     .map((a) => a.id)
   if (needQuery.length === 0) return
   try {
@@ -245,6 +246,7 @@ async function fetchCheckinStatus(): Promise<void> {
     if (!res.ok) throw new Error(`status=${res.status}`)
     const body = await res.json()
     const items: any[] = body?.data || []
+    const now = Date.now()
     let wroteSomething = false
     for (const it of items) {
       const acct = accounts.value.find((a) => a.id === it.accountId)
@@ -254,8 +256,9 @@ async function fetchCheckinStatus(): Promise<void> {
             checkedIn: true,
             checkinTime: it.checkinTime ?? null,
             checkinType: it.checkinType ?? 'daily',
+            fetchedAt: now,
           }
-        : { checkedIn: false, checkinTime: null, checkinType: null as any }
+        : { checkedIn: false, checkinTime: null, checkinType: null as any, fetchedAt: now }
       setCheckinSnapshot(acct.uid, snap)
       wroteSomething = true
     }

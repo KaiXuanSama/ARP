@@ -34,11 +34,16 @@ export interface UsageSnapshot {
  * checkedIn:    当日是否已签到（权威源是后端 DB，前端只是即时显示）
  * checkinTime:  签到时间（毫秒），仅在 checkedIn=true 时有意义
  * checkinType:  签到类型（当前为 'daily'，未来可扩展）
+ * fetchedAt:    本地缓存的写入时间（毫秒）。用于判定快照是否仍属"今天"——跨天后视为过期,
+ *               下次 ensureCheckinLoaded() 会重新拉一次后端。checkedIn=true 时 checkinTime
+ *               本身就是写入时间,但仍记录 fetchedAt 是为了 checkedIn=false 的场景(后端
+ *               返回"今天没签",前端没有别的参考点,只能用 fetch 时间)
  */
 export interface CheckinSnapshot {
   checkedIn: boolean
   checkinTime: number | null
   checkinType: 'daily' | string
+  fetchedAt: number
 }
 
 export interface AccountExtraSnapshot {
@@ -253,4 +258,37 @@ export function clearCheckinSnapshot(uid: string): void {
   const all = readAllCheckin()
   delete all[uid]
   writeAllCheckin(all)
+}
+
+// ============== 跨日判定 ==============
+
+/**
+ * 把一个毫秒时间戳归零到"当天 00:00:00"（系统本地时区）
+ * <p>
+ * 用作日期比较：同一年的两个时间戳，归零后相等即代表同一天
+ */
+function startOfLocalDay(ts: number): number {
+  const d = new Date(ts)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime()
+}
+
+/**
+ * 判断一个签到快照是否仍属"今天"
+ * <p>
+ * 规则:
+ *   - snap 为 null → false（从未拉过）
+ *   - checkedIn=true → 以 checkinTime 的日期为准（与 checkin_log.checkin_time 对齐）
+ *   - checkedIn=false → 以 fetchedAt 的日期为准（后端答"今天没签到",我们只记得"什么时候问的"）
+ * <p>
+ * 任意一个参考时间缺失都视为"过期"，强制下次重新拉取
+ */
+export function isCheckinSnapshotFromToday(snap: CheckinSnapshot | null, now: number = Date.now()): boolean {
+  if (!snap) return false
+  const todayStart = startOfLocalDay(now)
+  if (snap.checkedIn) {
+    if (typeof snap.checkinTime !== 'number') return false
+    return startOfLocalDay(snap.checkinTime) === todayStart
+  }
+  if (typeof snap.fetchedAt !== 'number') return false
+  return startOfLocalDay(snap.fetchedAt) === todayStart
 }

@@ -283,10 +283,11 @@ async function oneClickCheckin() {
       if (!row) continue
       const isOk = r.status === 'checked_in' || r.status === 'already_checked_in'
       if (isOk) {
-        const snap = {
+        const snap: CheckinSnapshot = {
           checkedIn: true,
           checkinTime: Date.now(),
-          checkinType: 'daily' as const,
+          checkinType: 'daily',
+          fetchedAt: Date.now(),
         }
         row.checkin = snap
         if (row.uid && row.uid !== '-') accountStore.setLocalCheckin(row.uid, snap)
