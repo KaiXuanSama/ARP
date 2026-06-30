@@ -2,6 +2,7 @@ package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.model.ModelConfig;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
+import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -24,7 +25,9 @@ import java.util.Map;
  * <p>
  * <strong>当前限制</strong>：
  * <ul>
- *   <li>Chat 端点仍走本机 .info 的 JWT（{@code UpstreamClient.postChatStream} 的旧路径），多账户路由尚未迁移 —— 跟之前对账过的 TODO 保持一致</li>
+ * <li>Chat端点当前只实现“指定模式”——读取设置表里的 {@code chat.consumption}，按指定 accountId 路由</li>
+ * <li>若指定账号使用 accessToken → Authorization + X-User-Id + X-Domain；若使用 API Key →仅 Authorization</li>
+ * <li>“量少优先 / 临期优先 /量多优先”暂未实现，请在系统设置中先保存为“指定模式”</li>
  *   <li>只暴露 OpenAI 协议的一小部分（chat/completions + models）；embedding / completions / files 等暂未实现</li>
  * </ul>
  */
@@ -37,10 +40,14 @@ public class OpenAiController {
 
     private final UpstreamClient upstream;
     private final ModelsConfigService modelsConfig;
+     private final SettingsService settingsService;
 
-    public OpenAiController(UpstreamClient upstream, ModelsConfigService modelsConfig) {
+     public OpenAiController(UpstreamClient upstream,
+     ModelsConfigService modelsConfig,
+     SettingsService settingsService) {
         this.upstream = upstream;
         this.modelsConfig = modelsConfig;
+     this.settingsService = settingsService;
     }
 
     // ============== Chat Completions ==============
@@ -62,7 +69,8 @@ public class OpenAiController {
         if (!(messages instanceof List<?> list) || list.size() < 2) {
             return Flux.error(new IllegalArgumentException("messages 至少需要 2 条（需包含 system 消息）"));
         }
-        return upstream.postChatStream(body);
+         Long accountId = settingsService.resolveDesignatedChatAccountId();
+         return upstream.postChatStreamForAccount(accountId, body);
     }
 
     // ============== Models ==============

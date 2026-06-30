@@ -89,13 +89,37 @@ public class UpstreamClient {
 
     // ============== Chat（暂保留旧路径，后续单独立项改造） ==============
 
+     /**
+     * 调用 Chat 补全端点（流式 SSE透传），按 accountId 路由
+     * <p>
+     *逻辑:
+     * <ul>
+     * <li>先按 accountId解析凭证({@link #resolveAuth(Long)})</li>
+     * <li>JWT 模式 → Authorization + X-User-Id + X-Domain</li>
+     * <li>API Key 模式 →仅 Authorization</li>
+     * <li>之后直接把上游 SSE chunk透传给下游,本服务不做任何加工</li>
+     * </ul>
+     */
+     public Flux<String> postChatStreamForAccount(Long accountId, Map<String, Object> body) {
+     return resolveAuth(accountId)
+     .flatMapMany(cred -> webClient.post()
+     .uri(UpstreamConstants.CHAT_BASE_URL + "/chat/completions")
+     .headers(h -> applyAuth(h, cred))
+     .bodyValue(body)
+     .retrieve()
+     .bodyToFlux(String.class)
+     .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
+     }
+
     /**
      * 调用 Chat 补全端点（流式 SSE 透传）
      * <p>
-     * TODO: 当前仍用本机 .info 的 JWT，跟多账户体系不一致；后续会跟 Billing 一样走 forAccountId(accountId) 路径
+     * @deprecated OpenAI /v1/chat/completions 已改走 {@link #postChatStreamForAccount(Long, Map)} + 设置表指定账号。
+     *这个旧方法仍保留给尚未迁移的调用方，继续使用本机 .info 的 JWT。
      *
      * @param body 完整的请求体（含 model/messages/stream 等）
      */
+     @Deprecated
     public Flux<String> postChatStream(Map<String, Object> body) {
         return workbuddyInfoService.getAccountInfoSafely()
                 .flatMapMany(info -> webClient.post()

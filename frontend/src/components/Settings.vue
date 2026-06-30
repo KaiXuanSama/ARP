@@ -329,7 +329,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-width: 720px;
+  width: 100%;
 }
 
 .card {

@@ -17,6 +17,12 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+ @ExceptionHandler(IllegalArgumentException.class)
+ @ResponseStatus(HttpStatus.BAD_REQUEST)
+ public Map<String, Object> handleBadRequest(IllegalArgumentException ex) {
+ return Map.of("status", "error", "message", ex.getMessage());
+ }
+
     @ExceptionHandler(MissingCredentialException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public Map<String, Object> handleMissingCredential(MissingCredentialException ex) {

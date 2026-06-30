@@ -78,12 +78,45 @@ public class SettingsService {
      /**
      *读取 "chat.consumption" 的强类型 value
      * <p>
-     * 专供 Settings 页面使用,避免前端每次都去拆通用的 {key,value,updatedAt} 外壳。
+     * 专供 Settings 页面与 OpenAI Chat 路由使用,避免前端每次都去拆通用的 {key,value,updatedAt} 外壳。
      * 找不到时返回 Optional.empty() → controller返404。
      */
      public Optional<ConsumptionSettingValue> getConsumptionValue() {
      return repository.findByKey(KEY_CHAT_CONSUMPTION)
      .map(rec -> readConsumptionValue(rec.value()));
+     }
+
+     /**
+     * 为 OpenAI Chat 路由解析当前生效的“指定账号”主键
+     * <p>
+     *规则:
+     * <ol>
+     * <li>若根本未保存过设置 → 抛400,提示先去系统设置保存</li>
+     * <li>若 mode不是 "designated" → 抛400,说明当前仅支持指定模式</li>
+     * <li>若 mode="designated"但 accountId为空 → 抛400</li>
+     * <li>若 accountId 指向的账号已删除 → 抛400</li>
+     * </ol>
+     * <p>
+     *之所以放在 service 而不是 controller:
+     * - 校验规则是业务规则,而不是 HTTP细节
+     * -未来“量少优先 / 临期优先 /量多优先”实现时,仍然从这里扩展
+     */
+     public Long resolveDesignatedChatAccountId() {
+     ConsumptionSettingValue setting = getConsumptionValue()
+     .orElseThrow(() -> new IllegalArgumentException("未配置对话消耗方式，请先在系统设置中保存"));
+
+     if (!"designated".equals(setting.mode())) {
+     throw new IllegalArgumentException("当前仅支持“指定模式”，其余消耗方式暂未实现");
+     }
+
+     Long accountId = setting.accountId();
+     if (accountId == null) {
+     throw new IllegalArgumentException("当前为指定模式，但未选择指定账号");
+     }
+     if (accountRepository.findById(accountId).isEmpty()) {
+     throw new IllegalArgumentException("指定账号不存在: " + accountId);
+     }
+     return accountId;
      }
 
     // ============== 写(只暴露 chat.consumption 这一个 key,避免泛 key 写入带来的校验扩散) ==============
