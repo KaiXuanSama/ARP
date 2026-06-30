@@ -66,3 +66,6 @@ src/main/resources/static/index.html
 
 # PowerShell scripts
 *.ps1
+
+# GitHub Actions
+.github
