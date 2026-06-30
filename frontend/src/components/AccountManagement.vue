@@ -6,16 +6,12 @@ import {
   type DataTableColumns, type UploadFileInfo
 } from 'naive-ui'
 import Icon from './Icon.vue'
-import {
-  getAccountExtra,
-  mergeAccountExtra,
-  getCheckinSnapshot,
-  setCheckinSnapshot,
-  setCachedAccounts,
-  type CreditSnapshot,
-  type UsageSnapshot,
-  type CheckinSnapshot,
+import type {
+  CreditSnapshot,
+  UsageSnapshot,
+  CheckinSnapshot,
 } from '../utils/accountExtras'
+import { useAccountData, type AccountDataView } from '../composables/useAccountData'
 
 interface WorkbuddyInfo {
   account?: {
@@ -163,98 +159,46 @@ const columns: DataTableColumns<AccountRow> = [
   },
 ]
 
+// ===== 共享 store：账号列表 / credit / usage / checkin 全部走这里 =====
+// 多个组件调用 useAccountData() 拿到同一个 ref,数据天然共享
+const accountStore = useAccountData()
+
+/**
+ * 把 store 提供的扁平视图 + 本地计算字段(凭证展示)合并成表格行数据
+ * <p>
+ * 这是 AccountManagement 表格真正需要的数据形态:每行包含
+ *   静态字段(id/uid/nickname/accountJson/accessToken/apiKey/updatedAt) +
+ *   动态字段(credit/usage/checkin) +
+ *   表格专用字段(primaryCredential)
+ */
+function buildRows(): AccountRow[] {
+  return accountStore.view.map((v: AccountDataView) => ({
+    id: v.id,
+    uid: v.uid,
+    nickname: v.nickname,
+    primaryCredential: pickPrimaryCredential(v.apiKey, v.accessToken),
+    apiKey: v.accessToken ? null : v.apiKey, // 兼容原 AccountRow 字段(apiKey / accessToken 二选一)
+    accessToken: v.accessToken,
+    updatedAt: v.updatedAt,
+    credit: v.credit ?? undefined,
+    usage: v.usage ?? undefined,
+    checkin: v.checkin ?? undefined,
+  }))
+}
+
 async function loadAccounts() {
-  try {
-    const res = await fetch('/api/accounts')
-    if (!res.ok) throw new Error(`加载失败: ${res.status}`)
-    const body = await res.json()
-    const rawList: any[] = body.data || []
-    // 同步写一份到 localStorage，供 Settings 等只读场景使用
-    setCachedAccounts(rawList.map((it) => ({
-      id: it.id,
-      uid: it.uid || '-',
-      accountJson: it.accountJson ?? '',
-      accessToken: it.accessToken || null,
-      apiKey: it.apiKey || null,
-      updatedAt: it.updatedAt,
-    })))
-    tableData.value = rawList.map((it: any) => {
-      const uid = it.uid || '-'
-      const extra = uid !== '-' ? getAccountExtra(uid) : {}
-      return {
-        id: it.id,
-        uid,
-        nickname: extractNickname(it.accountJson),
-        primaryCredential: pickPrimaryCredential(it.apiKey, it.accessToken),
-        apiKey: it.apiKey || null,
-        accessToken: it.accessToken || null,
-        updatedAt: it.updatedAt,
-        credit: extra.credit,
-        usage: extra.usage,
-        checkin: uid !== '-' ? getCheckinSnapshot(uid) ?? undefined : undefined,
-      }
-    })
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : '未知错误'
-    message.error(msg)
-  }
+  // 委派给 store:它会读 localStorage 缓存 + 后台异步刷新 + 跨 tab 同步
+  await accountStore.ensureAccountsLoaded()
+  // store 拉到的列表同步给表格。注意这里不用再调 setCachedAccounts,
+  // store 内部的 fetchAccountsFromServer 已经写过一次缓存
+  tableData.value = buildRows()
 }
 
 async function refreshExtras() {
-  if (tableData.value.length === 0) {
-    await loadAccounts()
-    return
-  }
-  const tasks = tableData.value
-    .filter((row) => row.uid && row.uid !== '-')
-    .map(async (row) => {
-      // 后端 /api/billing 路径变量改用 accountId（数据库主键），不再用 uid
-      // localStorage 缓存仍按 uid 索引（与 backend extra 字段对齐）
-      await Promise.allSettled([
-        fetchAndStore(row.uid, 'credit', `/api/billing/${row.id}/user-resource`),
-        fetchAndStore(row.uid, 'usage', `/api/billing/${row.id}/user-request-usage`, buildUsageQueryBody(7)),
-      ])
-    })
-  await Promise.allSettled(tasks)
-  await loadAccounts()
+  await accountStore.ensureExtrasLoaded()
+  // 后台异步刷新后,store 内部已写好 localStorage,重新读一次 ref
+  tableData.value = buildRows()
   message.success('积分、用量信息已刷新')
-}
-
-async function fetchAndStore(
-  uid: string,
-  key: 'credit' | 'usage',
-  url: string,
-  bodyObj?: Record<string, unknown>
-) {
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(bodyObj ?? {}),
-    })
-    if (!res.ok) return
-    const body = await res.json()
-    const snapshot = body?.extra?.[key]
-    if (snapshot && typeof snapshot === 'object') {
-      mergeAccountExtra(uid, key, snapshot)
-    }
-  } catch (e) {
-    console.warn(`刷新 ${uid}的 ${key}失败:`, e)
-  }
-}
-
-function extractNickname(json: string): string {
-  if (!json) return '未定义'
-  try {
-    const obj = JSON.parse(json)
-    // 兼容三种结构：嵌套 account.nickname、扁平 nickname（antigravity-tools 导出）
-    return obj?.account?.nickname
-      || obj?.accounts?.[0]?.nickname
-      || obj?.nickname
-      || '未定义'
-  } catch {
-    return '未定义'
-  }
 }
 
 function pickPrimaryCredential(apiKey?: string | null, accessToken?: string | null): string {
@@ -272,28 +216,6 @@ function maskToken(token: string): string {
 function formatTime(ts: number | null | undefined): string {
   if (!ts) return '-'
   return new Date(ts).toLocaleString('zh-CN')
-}
-
-/**
- * 构造"最近 N 天"的用量查询 body
- * <p>
- * 起始日 00:00:00，结束日 23:59:59 —— 与 BillingQueryService 的 UPSTREAM_DT_FMT 一致。
- * 后端会补 pageNum/pageSize，无需前端传。
- */
-function buildUsageQueryBody(days: number): Record<string, unknown> {
-  const now = new Date()
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59)
-  const start = new Date(end)
-  start.setDate(start.getDate() - (days - 1))
-  start.setHours(0, 0, 0, 0)
-  const fmt = (d: Date) => {
-    const p = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-  }
-  return {
-    startTime: fmt(start),
-    endTime: fmt(end),
-  }
 }
 
 // ======== 签到状态 ========
@@ -314,46 +236,14 @@ const allCheckedIn = computed(() => {
 /**
  * 拉取并合并签到状态
  * <p>
- * 只请求**没有 checkin 字段的**账号（避免重复请求）
+ * 委派给 store:它内部判断哪些 uid 缺 checkin 快照,只请求缺失的
  * <p>
  * 后端会按本地 checkin_log 表 + 当日时间窗自动判定，返回 checkedIn
  */
 async function queryCheckinStatus() {
-  if (tableData.value.length === 0) return
-  const needQuery = tableData.value
-    .filter((r) => !r.checkin && r.id != null)
-    .map((r) => r.id as number)
-  if (needQuery.length === 0) return
-  try {
-    const res = await fetch('/api/checkin/status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accountIds: needQuery }),
-    })
-    if (!res.ok) {
-      console.warn(`查询签到状态失败: ${res.status}`)
-      return
-    }
-    const body = await res.json()
-    const items: any[] = body?.data || []
-    for (const it of items) {
-      const row = tableData.value.find((r) => r.id === it.accountId)
-      if (!row) continue
-      const snap = it.checkedIn
-        ? {
-            checkedIn: true,
-            checkinTime: it.checkinTime ?? null,
-            checkinType: it.checkinType ?? 'daily',
-          }
-        : { checkedIn: false, checkinTime: null, checkinType: null as any }
-      row.checkin = snap
-      if (row.uid && row.uid !== '-') {
-        setCheckinSnapshot(row.uid, snap)
-      }
-    }
-  } catch (e) {
-    console.warn('查询签到状态异常:', e)
-  }
+  await accountStore.ensureCheckinLoaded()
+  // store 写完 localStorage 后,tableData 也需要重读一次让列立刻反映
+  tableData.value = buildRows()
 }
 
 /**
@@ -399,7 +289,7 @@ async function oneClickCheckin() {
           checkinType: 'daily' as const,
         }
         row.checkin = snap
-        if (row.uid && row.uid !== '-') setCheckinSnapshot(row.uid, snap)
+        if (row.uid && row.uid !== '-') accountStore.setLocalCheckin(row.uid, snap)
         // 仅收集本次"新签到成功"的账号（already_checked_in 不刷，因为上游没返新积分）
         if (r.status === 'checked_in') {
           freshRows.push(row)
@@ -432,23 +322,15 @@ async function oneClickCheckin() {
 /**
  * 仅刷新指定账号行列表的"积分剩余"（user-resource），不刷 usage、不弹全局成功提示
  * <p>
- * 用于：一键签到后只对"本次新签到成功"的账号拉最新积分数据，立即看到新加的积分
+ * 委派给 store.refreshOne(uid):store 内部按 uid 拉单条 credit
  * <p>
- * 后端路径用 accountId（数据库主键）作为路由变量
+ * 用于：一键签到后只对"本次新签到成功"的账号拉最新积分数据，立即看到新加的积分
  */
 async function refreshCreditForRows(rows: AccountRow[]) {
   if (rows.length === 0) return
-  const tasks = rows.map(async (row) => {
-    if (!row.uid || row.uid === '-') return
-    await fetchAndStore(row.uid, 'credit', `/api/billing/${row.id}/user-resource`)
-  })
-  await Promise.allSettled(tasks)
-  // 重新合成最新 tableData(从 localStorage 拉新缓存)
-  tableData.value = tableData.value.map((row) => {
-    if (!row.uid || row.uid === '-') return row
-    const extra = getAccountExtra(row.uid)
-    return { ...row, credit: extra.credit ?? row.credit, usage: extra.usage ?? row.usage }
-  })
+  await Promise.allSettled(rows.map((row) => accountStore.refreshOne(row.uid)))
+  // store 写完 localStorage 后,tableData 也需要重读一次让列立刻反映
+  tableData.value = buildRows()
   // 触发 filteredTableData 重新计算（仅被模板使用，TS 看不到模板引用）
   // eslint-disable-next-line @typescript-eslint/no-unused-expressions
   filteredTableData.value

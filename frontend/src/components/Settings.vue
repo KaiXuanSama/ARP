@@ -2,12 +2,8 @@
 import { computed, h, onMounted, ref, type VNode } from 'vue'
 import { NSelect, NSpin, useMessage, type SelectOption, type SelectGroupOption } from 'naive-ui'
 import Icon from './Icon.vue'
-import {
-  getAccountExtra,
-  getCachedAccounts,
-  type CachedAccount,
-  type CreditSnapshot,
-} from '../utils/accountExtras'
+import type { CreditSnapshot } from '../utils/accountExtras'
+import { useAccountData } from '../composables/useAccountData'
 
 /**
  * 系统设置页面（仅前端）
@@ -47,12 +43,12 @@ const consumptionMode = ref<ConsumptionMode>(MODE.DESIGNATED)
  */
 const showAccountPicker = computed(() => consumptionMode.value === MODE.DESIGNATED)
 
-// ===== 账号列表(从 localStorage 读,不发请求) =====
+// ===== 账号列表（走 store，缓存空时 store 内部会阻塞拉服务端一次） =====
 
 /**
- * 下拉框里展示用的账号条目(在 CachedAccount 基础上补充 credit 快照)
+ * 下拉框里展示用的账号条目（在 store 提供的 AccountDataView 基础上补充 credit 快照）
  * <p>
- * 跟 Naive UI 的 SelectOption 同形(value/label),多出来的 credit 字段只用于 render-label 渲染
+ * 跟 Naive UI 的 SelectOption 同形（value/label），多出来的 credit 字段只用于 render-label 渲染
  */
 interface AccountOption extends SelectOption {
   id: number
@@ -62,63 +58,50 @@ interface AccountOption extends SelectOption {
 }
 
 const message = useMessage()
-const accountOptions = ref<AccountOption[]>([])
+const accountStore = useAccountData()
 const selectedAccountId = ref<number | null>(null)
 const loadingAccounts = ref(false)
 
 /**
- * 把 CreditSnapshot 折叠成"已用/总量"两个数
+ * 把 store 的扁平视图转成下拉框用的 AccountOption
  * <p>
- * 算法与 AccountManagement.vue 表格"积分剩余"列完全一致:
- *   remain = Σ packages.cycleCapacityRemain
- *   size   = Σ packages.cycleCapacitySize
+ * store.view 已经把 credit 拼好了,这里只负责 SelectOption 的 value/label 兜底
  */
-function summarizeCredit(snap: CreditSnapshot | null | undefined): { remain: number; size: number } {
-  if (!snap || !Array.isArray(snap.packages)) return { remain: 0, size: 0 }
-  let remain = 0
-  let size = 0
-  for (const p of snap.packages) {
-    remain += p.cycleCapacityRemain || 0
-    size += p.cycleCapacitySize || 0
-  }
-  return { remain, size }
-}
-
-function displayName(rec: CachedAccount): string {
-  if (rec.nickname && rec.nickname !== '未定义') return rec.nickname
-  return rec.uid
-}
-
-function buildAccountOption(rec: CachedAccount): AccountOption {
-  const extra = getAccountExtra(rec.uid)
-  return {
-    value: rec.id,
-    label: displayName(rec), // 兜底:render-label 失败时 Naive 会用 label
-    id: rec.id,
-    uid: rec.uid,
-    nickname: displayName(rec),
-    credit: extra?.credit ?? null,
-  }
-}
+const accountOptions = computed<AccountOption[]>(() =>
+  accountStore.view
+    .filter((v) => v.uid && v.uid !== '-')
+    .map((v) => ({
+      value: v.id,
+      label: v.nickname && v.nickname !== '未定义' ? v.nickname : v.uid,
+      id: v.id,
+      uid: v.uid,
+      nickname: v.nickname && v.nickname !== '未定义' ? v.nickname : v.uid,
+      credit: v.credit,
+    })),
+)
 
 /**
- * 同步从 localStorage 读账号列表(由 AccountManagement 写入,见 utils/accountExtras.ts)
+ * 触发 store 加载(缓存非空立刻返回;缓存空阻塞拉一次服务端)
  * <p>
- * Settings 是只读场景,不发请求;空列表提示用户去账号管理先走一遍
+ * onMounted 调一次即可,数据回流到 accountStore.view → accountOptions 自动重算
+ * <p>
+ * 串行等 ensureExtrasLoaded:让下拉项右侧的"积分消耗"也能显示出来,
+ * 否则 credit 字段为 null,渲染出来全是 "-"
  */
-function loadAccounts(): void {
+async function loadAccounts(): Promise<void> {
   loadingAccounts.value = true
   try {
-    const records = getCachedAccounts()
-    accountOptions.value = records.map(buildAccountOption)
+    await accountStore.ensureAccountsLoaded()
     // 默认选中第一项(仅在用户没选过时)
     if (selectedAccountId.value == null && accountOptions.value.length > 0) {
       selectedAccountId.value = accountOptions.value[0].id
     }
+    // 后台拉所有账号的 credit/usage;accountOptions 是 computed,
+    // store 写完 localStorage 后会触发它重算,下拉项右侧自动刷新
+    await accountStore.ensureExtrasLoaded()
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : '未知错误'
     message.error(msg)
-    accountOptions.value = []
   } finally {
     loadingAccounts.value = false
   }
@@ -141,6 +124,24 @@ function renderAccountLabel(option: SelectOption | SelectGroupOption): VNode {
     : '-'
   const text = `${opt.nickname || opt.uid}（${creditText}）`
   return h('div', { class: 'account-option' }, text)
+}
+
+/**
+ * 把 CreditSnapshot 折叠成"已用/总量"两个数
+ * <p>
+ * 算法与 AccountManagement.vue 表格"积分剩余"列完全一致:
+ *   remain = Σ packages.cycleCapacityRemain
+ *   size   = Σ packages.cycleCapacitySize
+ */
+function summarizeCredit(snap: CreditSnapshot | null | undefined): { remain: number; size: number } {
+  if (!snap || !Array.isArray(snap.packages)) return { remain: 0, size: 0 }
+  let remain = 0
+  let size = 0
+  for (const p of snap.packages) {
+    remain += p.cycleCapacityRemain || 0
+    size += p.cycleCapacitySize || 0
+  }
+  return { remain, size }
 }
 
 onMounted(() => {
