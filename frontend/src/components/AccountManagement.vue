@@ -11,6 +11,7 @@ import {
   mergeAccountExtra,
   getCheckinSnapshot,
   setCheckinSnapshot,
+  setCachedAccounts,
   type CreditSnapshot,
   type UsageSnapshot,
   type CheckinSnapshot,
@@ -167,7 +168,17 @@ async function loadAccounts() {
     const res = await fetch('/api/accounts')
     if (!res.ok) throw new Error(`加载失败: ${res.status}`)
     const body = await res.json()
-    tableData.value = (body.data || []).map((it: any) => {
+    const rawList: any[] = body.data || []
+    // 同步写一份到 localStorage，供 Settings 等只读场景使用
+    setCachedAccounts(rawList.map((it) => ({
+      id: it.id,
+      uid: it.uid || '-',
+      accountJson: it.accountJson ?? '',
+      accessToken: it.accessToken || null,
+      apiKey: it.apiKey || null,
+      updatedAt: it.updatedAt,
+    })))
+    tableData.value = rawList.map((it: any) => {
       const uid = it.uid || '-'
       const extra = uid !== '-' ? getAccountExtra(uid) : {}
       return {
@@ -180,7 +191,7 @@ async function loadAccounts() {
         updatedAt: it.updatedAt,
         credit: extra.credit,
         usage: extra.usage,
-        checkin: uid !== '-' ? getCheckinSnapshot(uid) : null,
+        checkin: uid !== '-' ? getCheckinSnapshot(uid) ?? undefined : undefined,
       }
     })
   } catch (e: unknown) {
