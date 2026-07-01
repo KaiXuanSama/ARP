@@ -63,6 +63,21 @@ interface AccountRow {
  checkinProgress?: 'pending' | 'running' | 'done' | 'error'
 }
 
+/**
+ * 流量包视图的一行(扁平化:一个账号多个流量包 → 多个 PackageRow)
+ * <p>
+ * 携带原 AccountRow 的 id/nickname/uid 用于"编号"与"昵称"列展示,
+ * 以及单个 CreditPackage 用于"流量包名称/余量/过期时间"三列
+ * <p>
+ * rowKey 用 accountId + packageCode 复合,避免同账号多流量包出现重复 key
+ */
+interface PackageRow {
+ accountId: number
+ uid: string
+ nickname: string
+ package: CreditPackage
+}
+
 interface CheckinStreamEvent {
  type: 'started' | 'result' | 'summary'
  accountId: number | null
@@ -102,9 +117,43 @@ function openPackagesModal(row: AccountRow): void {
  showPackages.value = true
 }
 
-const searchKeyword = ref('')
 const tableData = ref<AccountRow[]>([])
 const checkingIn = ref(false)
+
+/**
+ * 表格视图模式
+ * <ul>
+ *   <li>normal —— 当前的主表(账号一行 + 凭证/积分/签到等列),跟"凭证列"功能配套</li>
+ *   <li>packages —— 流量包平铺视图(一个账号多个流量包 → 多行,主键=accountId+packageCode)</li>
+ * </ul>
+ * 排序规则后续会按视图分别实现,先按原数据顺序展示
+ */
+type ViewMode = 'normal' | 'packages'
+const viewMode = ref<ViewMode>('normal')
+/** 视图模式下拉的可选项(Naive UI SelectOption[]) */
+const viewModeOptions = [
+ { label: '普通视图', value: 'normal' },
+ { label: '流量包视图', value: 'packages' },
+]
+
+/**
+ * 流量包视图的排序规则
+ * <ul>
+ *   <li>remainAsc —— cycleCapacityRemain 升序(余量最少的在顶,默认)</li>
+ *   <li>remainDesc —— 降序</li>
+ *   <li>endAsc —— cycleEndTime 升序(最先过期的在顶)</li>
+ *   <li>endDesc —— 降序</li>
+ * </ul>
+ * 余额=0 的流量包(耗尽)不参与上述任何排序,统一丢到列表末尾
+ */
+type PackageSort = 'remainAsc' | 'remainDesc' | 'endAsc' | 'endDesc'
+const packageSort = ref<PackageSort>('remainAsc')
+const packageSortOptions = [
+ { label: '余量递增', value: 'remainAsc' },
+ { label: '余量递减', value: 'remainDesc' },
+ { label: '到期时间递增', value: 'endAsc' },
+ { label: '到期时间递减', value: 'endDesc' },
+]
 
 // ===== 签到按钮右键菜单（强制签到） =====
 const showCheckinCtxMenu = ref(false)
@@ -229,16 +278,86 @@ async function copyPrimaryCredential(row: AccountRow): Promise<void> {
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const filteredTableData = computed<AccountRow[]>(() => {
- const kw = searchKeyword.value.trim().toLowerCase()
- if (!kw) return tableData.value
- return tableData.value.filter((row) => {
- const nickname = (row.nickname || '').toLowerCase()
- const uid = (row.uid || '').toLowerCase()
- return nickname.includes(kw) || uid.includes(kw)
+/**
+ * 流量包视图用的扁平化行数据(已排序)
+ * <p>
+ * 展开策略:从 tableData 按 packages 展开成 PackageRow[],无 credit/packages 的账号不出现在流量包视图
+ * <p>
+ * 排序策略:
+ * <ol>
+ *   <li>余额=0(耗尽)的包不参与主排序 —— 统一丢到列表末尾,组内按 cycleEndTime 升序(让"先过期"在"后过期"前)</li>
+ *   <li>非耗尽包按 packageSort 选中的规则排序:
+ *       <ul>
+ *         <li>remainAsc / remainDesc —— cycleCapacityRemain 数值升/降</li>
+ *         <li>endAsc / endDesc —— cycleEndTime 字符串升/降("yyyy-MM-dd HH:mm:ss" 字典序=时间序)</li>
+ *       </ul>
+ *   </li>
+ *   <li>cycleEndTime 为空的包在"按到期时间"排序时统一丢到组末(空串字典序最小,会冲顶部破坏语义)</li>
+ * </ol>
+ */
+const packageRows = computed<PackageRow[]>(() => {
+ const flat: PackageRow[] = []
+ for (const acc of tableData.value) {
+ const pkgs = acc.credit?.packages
+ if (!Array.isArray(pkgs) || pkgs.length ===0) continue
+ for (const pkg of pkgs) {
+ flat.push({
+ accountId: acc.id,
+ uid: acc.uid,
+ nickname: acc.nickname,
+ package: pkg,
  })
+ }
+ }
+
+ // 1) 分桶:耗尽 vs 非耗尽
+ const exhausted: PackageRow[] = []
+ const active: PackageRow[] = []
+ for (const r of flat) {
+ if (isExhausted(r.package)) exhausted.push(r)
+ else active.push(r)
+ }
+
+ // 2) 非耗尽组按所选规则排序
+ active.sort((a, b) => comparePackages(a.package, b.package, packageSort.value))
+
+ // 3) 耗尽组固定按到期时间升序(让"先过期"在前)—— 不参与主排序
+ exhausted.sort((a, b) => compareEndTimeAsc(a.package, b.package))
+
+ return [...active, ...exhausted]
 })
+
+/**
+ * 包比较器:按 PackageSort 规则比较两个 CreditPackage
+ * <p>
+ * 抽到模块级函数而不是 inline,让上面 sort 调用读起来不那么密
+ */
+function comparePackages(a: CreditPackage, b: CreditPackage, mode: PackageSort): number {
+ switch (mode) {
+ case 'remainAsc':
+ return a.cycleCapacityRemain - b.cycleCapacityRemain
+ case 'remainDesc':
+ return b.cycleCapacityRemain - a.cycleCapacityRemain
+ case 'endAsc':
+ return compareEndTimeAsc(a, b)
+ case 'endDesc':
+ return compareEndTimeAsc(b, a) // 翻转参数实现降序
+ }
+}
+
+/**
+ * 到期时间升序比较
+ * <p>
+ * 空 cycleEndTime 一律丢到末尾(返回 1),不参与"最早过期在前"的语义
+ */
+function compareEndTimeAsc(a: CreditPackage, b: CreditPackage): number {
+ const ta = a.cycleEndTime || ''
+ const tb = b.cycleEndTime || ''
+ if (!ta && !tb) return 0
+ if (!ta) return 1
+ if (!tb) return -1
+ return ta.localeCompare(tb)
+}
 
 const checkinButtonLabel = computed(() => checkingIn.value ? '签到进行中…' : '一键每日签到')
 
@@ -361,6 +480,51 @@ const packageColumns: DataTableColumns<CreditPackage> = [
 function isExhausted(p: CreditPackage): boolean {
  return (p.cycleCapacityRemain ??0) <=0
 }
+
+/**
+ * 流量包视图(主表)用的列定义
+ * <p>
+ * 5 列:编号 / 昵称 / 流量包名称 / 流量包余量 / 过期时间
+ * <p>
+ * 颜色复用 isExhausted,与弹窗里的 packageColumns 风格一致;
+ * 排序规则待用户补,当前完全按 packageRows 顺序展示
+ */
+const packageViewColumns: DataTableColumns<PackageRow> = [
+ {
+ title: '编号',
+ key: 'accountId',
+ width:70,
+ render: (row: PackageRow) => row.accountId,
+ },
+ {
+ title: '昵称',
+ key: 'nickname',
+ width:160,
+ render: (row: PackageRow) => row.nickname || '未定义',
+ },
+ {
+ title: '流量包名称',
+ key: 'packageName',
+ ellipsis: { tooltip: true },
+ render: (row: PackageRow) => h('span', {
+ style: { color: isExhausted(row.package) ? '#d03050' : undefined },
+ }, row.package.packageName || row.package.packageCode || '-'),
+ },
+ {
+ title: '流量包余量',
+ key: 'cycleCapacityRemain',
+ width:160,
+ render: (row: PackageRow) => h('span', {
+ style: { color: isExhausted(row.package) ? '#d03050' : undefined },
+ }, `${row.package.cycleCapacityRemain.toFixed(1)} / ${row.package.cycleCapacitySize.toFixed(0)}`),
+ },
+ {
+ title: '过期时间',
+ key: 'cycleEndTime',
+ width:170,
+ render: (row: PackageRow) => row.package.cycleEndTime || '-',
+ },
+]
 
 /**
  * 弹窗用的"按余量+到期时间复合排序"的流量包副本
@@ -613,7 +777,6 @@ async function refreshCreditForRows(rows: AccountRow[]) {
  if (rows.length ===0) return
  await Promise.allSettled(rows.map((row) => accountStore.refreshOne(row.uid)))
  tableData.value = buildRows()
- filteredTableData.value
 }
 
 function openChooser() {
@@ -758,11 +921,19 @@ onMounted(async () => {
   <div class="page">
     <div class="toolbar">
       <div class="toolbar-left">
-        <n-input v-model:value="searchKeyword" placeholder="搜索昵称" clearable style="width:240px">
-          <template #prefix>
-            <Icon name="search" :size="14" />
-          </template>
-        </n-input>
+        <n-select
+          v-model:value="viewMode"
+          :options="viewModeOptions"
+          size="small"
+          style="width:140px"
+        />
+        <n-select
+          v-if="viewMode === 'packages'"
+          v-model:value="packageSort"
+          :options="packageSortOptions"
+          size="small"
+          style="width:140px"
+        />
       </div>
       <div class="toolbar-right">
         <n-button quaternary @click="refreshExtras">
@@ -771,25 +942,27 @@ onMounted(async () => {
           </template>
           刷新
         </n-button>
-        <n-button
-          type="warning"
-          :disabled="allCheckedIn || checkingIn"
-          :loading="checkingIn"
-          @click="oneClickCheckin"
-          @contextmenu="onCheckinButtonContextMenu"
-        >
-         {{ checkinButtonLabel }}
-        </n-button>
-        <n-dropdown
-          trigger="manual"
-          placement="bottom-start"
-          :show="showCheckinCtxMenu"
-          :options="checkinCtxMenuOptions"
-          :x="checkinCtxMenuX"
-          :y="checkinCtxMenuY"
-          @select="handleCheckinCtxMenuSelect"
-          @clickoutside="showCheckinCtxMenu = false"
-        />
+        <template v-if="viewMode === 'normal'">
+          <n-button
+            type="warning"
+            :disabled="allCheckedIn || checkingIn"
+            :loading="checkingIn"
+            @click="oneClickCheckin"
+            @contextmenu="onCheckinButtonContextMenu"
+          >
+           {{ checkinButtonLabel }}
+          </n-button>
+          <n-dropdown
+            trigger="manual"
+            placement="bottom-start"
+            :show="showCheckinCtxMenu"
+            :options="checkinCtxMenuOptions"
+            :x="checkinCtxMenuX"
+            :y="checkinCtxMenuY"
+            @select="handleCheckinCtxMenuSelect"
+            @clickoutside="showCheckinCtxMenu = false"
+          />
+        </template>
         <n-button type="primary" @click="openChooser">
           <template #icon>
             <Icon name="plus" :size="14" />
@@ -800,8 +973,19 @@ onMounted(async () => {
     </div>
 
     <n-card :bordered="false" class="table-card">
-       <n-data-table :columns="columns" :data="filteredTableData" :bordered="false" :single-line="false" size="small"
+      <!--
+        在两个 n-data-table 上分别加 :key,key 值含 viewMode
+        目的:切换视图时强制 n-data-table 组件实例整体重建,避免 Vue 复用节点
+        导致旧视图的内部状态(行缓存/虚拟滚动位置/排序)与新视图的 data/columns 不一致,
+        表现就是"切换排序时列表叠加/不刷新"
+        key 用 'normal' / 'packages' 区别两个分支(不冲突 v-if/else unique-key 规则)
+      -->
+      <n-data-table v-if="viewMode === 'normal'" key="normal"
+        :columns="columns" :data="tableData" :bordered="false" :single-line="false" size="small"
         :row-key="(row: AccountRow) => row.id" />
+      <n-data-table v-else key="packages"
+        :columns="packageViewColumns" :data="packageRows" :bordered="false" :single-line="false" size="small"
+        :row-key="(row: PackageRow) => `${row.accountId}-${row.package.packageCode || 'empty'}-${row.package.cycleEndTime || '0'}`" />
     </n-card>
 
     <!--三入口选择 -->
@@ -933,6 +1117,12 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .toolbar-right {
