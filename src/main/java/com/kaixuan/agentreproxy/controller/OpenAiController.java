@@ -20,15 +20,19 @@ import java.util.Map;
 /**
  * OpenAI 兼容端点（/v1/*）
  * <p>
- * 让任意 OpenAI SDK（openai-python / langchain / OpenAI Node 等）能以本服务为 base URL 直接调用。
+ * 让任意 OpenAI SDK（openai-python / langchain / OpenAI Node 等）能以本服务为 base URL
+ * 直接调用。
  * 上游是 CodeBuddy（本身就走 OpenAI 协议），所以这里只做"加 /v1 前缀 + 字段补全 + 鉴权透传"的轻量包装。
  * <p>
  * <strong>当前限制</strong>：
  * <ul>
- * <li>Chat端点当前只实现“指定模式”——读取设置表里的 {@code chat.consumption}，按指定 accountId 路由</li>
- * <li>若指定账号使用 accessToken → Authorization + X-User-Id + X-Domain；若使用 API Key →仅 Authorization</li>
- * <li>“量少优先 / 临期优先 /量多优先”暂未实现，请在系统设置中先保存为“指定模式”</li>
- *   <li>只暴露 OpenAI 协议的一小部分（chat/completions + models）；embedding / completions / files 等暂未实现</li>
+ * <li>Chat端点当前支持“指定模式 / 临期优先”——读取设置表里的 {@code chat.consumption}，解析出目标 accountId
+ * 路由</li>
+ * <li>若指定账号使用 accessToken → Authorization + X-User-Id + X-Domain；若使用 API Key →仅
+ * Authorization</li>
+ * <li>“量少优先 /量多优先”暂未实现；“临期优先”会从本地缓存的 credit.packages 中挑最先过期且余量 &gt;0 的账号</li>
+ * <li>只暴露 OpenAI 协议的一小部分（chat/completions + models）；embedding / completions /
+ * files 等暂未实现</li>
  * </ul>
  */
 @RestController
@@ -40,14 +44,14 @@ public class OpenAiController {
 
     private final UpstreamClient upstream;
     private final ModelsConfigService modelsConfig;
-     private final SettingsService settingsService;
+    private final SettingsService settingsService;
 
-     public OpenAiController(UpstreamClient upstream,
-     ModelsConfigService modelsConfig,
-     SettingsService settingsService) {
+    public OpenAiController(UpstreamClient upstream,
+            ModelsConfigService modelsConfig,
+            SettingsService settingsService) {
         this.upstream = upstream;
         this.modelsConfig = modelsConfig;
-     this.settingsService = settingsService;
+        this.settingsService = settingsService;
     }
 
     // ============== Chat Completions ==============
@@ -69,17 +73,20 @@ public class OpenAiController {
         if (!(messages instanceof List<?> list) || list.size() < 2) {
             return Flux.error(new IllegalArgumentException("messages 至少需要 2 条（需包含 system 消息）"));
         }
-         Long accountId = settingsService.resolveDesignatedChatAccountId();
-         return upstream.postChatStreamForAccount(accountId, body);
+        return settingsService.resolveChatAccountId()
+                .flatMapMany(accountId -> upstream.postChatStreamForAccount(accountId, body));
     }
 
     // ============== Models ==============
 
     /**
-     * 数据源由 {@link ModelsConfigService} 决定，优先级：环境变量 {@code MODELS_CONFIG_PATH} → 工作目录
-     * {@code modelsConfig.json} → classpath 内置 {@code models-config.default.json}。改完配置重启服务生效。
+     * 数据源由 {@link ModelsConfigService} 决定，优先级：环境变量 {@code MODELS_CONFIG_PATH} →
+     * 工作目录
+     * {@code modelsConfig.json} → classpath 内置
+     * {@code models-config.default.json}。改完配置重启服务生效。
      * <p>
      * 输出 shape 严格对齐 OpenAI：
+     * 
      * <pre>
      * { "object": "list", "data": [ { "id": "auto", "object": "model", "created": 1700000000,
      *                                  "owned_by": "virtual", "context_length": 172032 } ] }
@@ -87,10 +94,10 @@ public class OpenAiController {
      * <p>
      * 字段对应：
      * <ul>
-     *   <li>{@code id}            ← ModelConfig.id</li>
-     *   <li>{@code owned_by}      ← ModelConfig.family（CodeBuddy 的"族"概念，作为 owner 占位）</li>
-     *   <li>{@code context_length}← ModelConfig.contextLength</li>
-     *   <li>{@code created}       ← 全列表共用同一锚点时间（OpenAI 官方也是 created_at 风格）</li>
+     * <li>{@code id} ← ModelConfig.id</li>
+     * <li>{@code owned_by} ← ModelConfig.family（CodeBuddy 的"族"概念，作为 owner 占位）</li>
+     * <li>{@code context_length}← ModelConfig.contextLength</li>
+     * <li>{@code created} ← 全列表共用同一锚点时间（OpenAI 官方也是 created_at 风格）</li>
      * </ul>
      */
     @GetMapping("/models")
