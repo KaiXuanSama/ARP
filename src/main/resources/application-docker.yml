@@ -12,6 +12,12 @@ spring:
     init:
       mode: always
 
+  # WebFlux 内存缓冲阈值:与 application.yml 保持一致(25MB)。
+  # 路径在 Spring 3.5 改为 spring.http.codecs.*(旧 spring.codec.* 已弃用)。
+  http:
+    codecs:
+      max-in-memory-size: 25MB
+
 # Docker 环境配置
 server:
   port: 8351
