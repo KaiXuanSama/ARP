@@ -19,6 +19,7 @@ import {
 import Icon from './Icon.vue'
 import type {
  CheckinSnapshot,
+ CreditPackage,
  CreditSnapshot,
  UsageSnapshot,
 } from '../utils/accountExtras'
@@ -91,6 +92,15 @@ const showAccessToken = ref(false)
 const showApiKeyForm = ref(false)
 const apiKeyForm = ref<ApiKeyOnlyPayload>({ nickname: '', apiKey: '' })
 const savingApiKey = ref(false)
+
+/** 流量包明细弹窗 */
+const showPackages = ref(false)
+const packagesRow = ref<AccountRow | null>(null)
+
+function openPackagesModal(row: AccountRow): void {
+ packagesRow.value = row
+ showPackages.value = true
+}
 
 const searchKeyword = ref('')
 const tableData = ref<AccountRow[]>([])
@@ -243,7 +253,7 @@ const columns: DataTableColumns<AccountRow> = [
  {
  title: '凭证',
  key: 'credentials',
- width:220,
+ width:180,
  render: (row: AccountRow) => h(NButton, {
  quaternary: true,
  size: 'tiny',
@@ -254,13 +264,27 @@ const columns: DataTableColumns<AccountRow> = [
  {
  title: '积分剩余',
  key: 'creditRemain',
- width:140,
+ width:100,
  render: (row: AccountRow) => {
  if (!row.credit || !Array.isArray(row.credit.packages)) return '-'
  const remain = row.credit.packages.reduce((s, p) => s + (p.cycleCapacityRemain ||0),0)
  const size = row.credit.packages.reduce((s, p) => s + (p.cycleCapacitySize ||0),0)
  return `${remain.toFixed(1)} / ${size.toFixed(0)}`
  },
+ },
+ {
+ title: '流量包明细',
+ key: 'packages',
+ width:100,
+ render: (row: AccountRow) => h(NButton, {
+ quaternary: true,
+ size: 'tiny',
+ disabled: !row.credit || !Array.isArray(row.credit.packages) || row.credit.packages.length ===0,
+ onClick: () => openPackagesModal(row),
+ }, () => {
+ const n = row.credit?.packages?.length ??0
+ return n >0 ? `查看明细 (${n})` : '-'
+ }),
  },
  {
  title: '本期消耗',
@@ -274,7 +298,7 @@ const columns: DataTableColumns<AccountRow> = [
  {
  title: '当日签到状态',
  key: 'checkin',
- width:160,
+ width:110,
  render: (row: AccountRow) => {
  if (row.checkinProgress === 'running') {
  return h('span', { style: { color: '#2080f0', fontWeight: '500' } }, '签到中…')
@@ -297,6 +321,77 @@ const columns: DataTableColumns<AccountRow> = [
  render: (row: AccountRow) => formatTime(row.updatedAt),
  },
 ]
+
+/**
+ * 流量包明细弹窗内嵌的小表格列
+ * <p>
+ * 严格按用户要求只展示三类信息:名称 / 积分余量 / 到期时间
+ * <p>
+ * cycleEndTime 是 CodeBuddy 上游直接回传的字符串(典型形态 "yyyy-MM-dd HH:mm:ss"),
+ * 保持原样显示 —— 不在浏览器侧做时区转换,避免出现"看着是 7/31 但服务器认为已过期"这种鬼影
+ * <p>
+ * 余量为 0 的流量包(已用完)其名称与积分余量文本标红 —— 跟"签到失败"复用同一个 danger 色
+ */
+const packageColumns: DataTableColumns<CreditPackage> = [
+ {
+ title: '名称',
+ key: 'packageName',
+ ellipsis: { tooltip: true },
+ render: (p: CreditPackage) => h('span', {
+ style: { color: isExhausted(p) ? '#d03050' : undefined },
+ }, p.packageName || p.packageCode || '-'),
+ },
+ {
+ title: '积分余量',
+ key: 'cycleCapacityRemain',
+ width:140,
+ render: (p: CreditPackage) => h('span', {
+ style: { color: isExhausted(p) ? '#d03050' : undefined },
+ }, `${p.cycleCapacityRemain.toFixed(1)} / ${p.cycleCapacitySize.toFixed(0)}`),
+ },
+ {
+ title: '到期时间',
+ key: 'cycleEndTime',
+ width:170,
+ render: (p: CreditPackage) => p.cycleEndTime || '-',
+ },
+]
+
+/** 流量包是否已耗尽(余量 ≤ 0)。"用完"在产品语义上包含负数与 0 */
+function isExhausted(p: CreditPackage): boolean {
+ return (p.cycleCapacityRemain ??0) <=0
+}
+
+/**
+ * 弹窗用的"按余量+到期时间复合排序"的流量包副本
+ * <p>
+ * 排序策略(优先级从高到低):
+ * <ol>
+ *   <li>余量=0 的流量包丢到末尾 —— "最先过期放顶部"只对仍有积分的包有意义</li>
+ *   <li>余量正常的包之间,按 cycleEndTime 字典序升序 —— "yyyy-MM-dd HH:mm:ss" 字典序就是时间序,无需 new Date() 解析</li>
+ *   <li>到期时间为空的丢到末尾(空串字典序最小,会冲到最顶,违反"最先过期放顶部"语义)</li>
+ * </ol>
+ * <p>
+ * 用 computed 包装,模态框打开/账号切换/credit 刷新都会自动重算 —— 不需要在 buildRows 里复制字段
+ */
+const sortedPackages = computed<CreditPackage[]>(() => {
+ const list = packagesRow.value?.credit?.packages
+ if (!Array.isArray(list)) return []
+ return [...list].sort((a, b) => {
+ // 优先级 1:余量=0 排末尾
+ const ea = isExhausted(a) ? 1 :0
+ const eb = isExhausted(b) ? 1 :0
+ if (ea !== eb) return ea - eb
+
+ // 优先级 2:到期时间升序
+ const ta = a.cycleEndTime || ''
+ const tb = b.cycleEndTime || ''
+ if (!ta && !tb) return 0
+ if (!ta) return 1
+ if (!tb) return -1
+ return ta.localeCompare(tb)
+ })
+})
 
 function buildRows(): AccountRow[] {
  return accountStore.view.map((v: AccountDataView) => ({
@@ -804,6 +899,25 @@ onMounted(async () => {
         </n-space>
       </template>
     </n-modal>
+
+    <!--流量包明细 -->
+    <n-modal v-model:show="showPackages" preset="card"
+      :title="`流量包明细 — ${packagesRow?.nickname && packagesRow.nickname !== '未定义' ? packagesRow.nickname : packagesRow?.uid || ''}`"
+      style="width:680px; max-height: calc(100vh -64px);">
+      <div v-if="!packagesRow?.credit || !Array.isArray(packagesRow.credit.packages) || packagesRow.credit.packages.length ===0"
+        class="empty-hint">
+        暂无流量包数据。请点击「刷新积分」拉取一次。
+      </div>
+      <div v-else class="packages-table-scroll">
+        <n-data-table size="small" :bordered="false" :single-line="false" :columns="packageColumns"
+          :data="sortedPackages" :row-key="(p: CreditPackage) => p.packageCode" />
+      </div>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showPackages = false">关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -829,6 +943,29 @@ onMounted(async () => {
 .table-card {
   background: #fff;
   border-radius: 8px;
+}
+
+.empty-hint {
+  padding: 24px 12px;
+  text-align: center;
+  color: #8c8c8c;
+  font-size: 13px;
+}
+
+/**
+ * 流量包明细弹窗内嵌表格的滚动容器
+ * <p>
+ * 双重防御保证弹窗"不超出显示高度":
+ * <ol>
+ *   <li>外层 n-modal 已用 max-height: calc(100vh - 64px) 限制整体高度</li>
+ *   <li>本容器用 calc(100vh - 240px) 给内嵌表格一个明确的上限,长流量包列表在弹窗体内独立滚动
+ *       —— footer 始终固定在弹窗底部,不会因列表变长而被顶到屏幕外</li>
+ * </ol>
+ * 240px = title(36) + padding(40) + footer(60) + 上下空隙(104) 的余量估值
+ */
+.packages-table-scroll {
+  max-height: calc(100vh - 240px);
+  overflow: auto;
 }
 
 .entry-list {
