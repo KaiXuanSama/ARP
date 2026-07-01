@@ -1,479 +1,620 @@
 <script setup lang="ts">
-import { h, computed, onMounted, ref } from 'vue'
+import { computed, h, nextTick, onMounted, ref } from 'vue'
 import {
-  NButton, NModal, NCard, NDescriptions, NDescriptionsItem,
-  NSpin, NSpace, NDataTable, NInput, NUpload, useMessage,
-  type DataTableColumns, type UploadFileInfo
+ NButton,
+ NCard,
+ NDataTable,
+ NDescriptions,
+ NDescriptionsItem,
+ NDropdown,
+ NInput,
+ NModal,
+ NSpin,
+ NSpace,
+ NUpload,
+ useMessage,
+ type DataTableColumns,
+ type UploadFileInfo,
 } from 'naive-ui'
 import Icon from './Icon.vue'
 import type {
-  CreditSnapshot,
-  UsageSnapshot,
-  CheckinSnapshot,
+ CheckinSnapshot,
+ CreditSnapshot,
+ UsageSnapshot,
 } from '../utils/accountExtras'
 import { useAccountData, type AccountDataView } from '../composables/useAccountData'
 
 interface WorkbuddyInfo {
-  account?: {
-    uid?: string
-    nickname?: string
-    uin?: string
-    type?: string
-    pluginEnabled?: boolean
-    phoneNumber?: string
-  }
-  auth?: {
-    accessToken?: string
-    tokenType?: string
-    scope?: string
-    domain?: string
-    expiresAt?: number
-    refreshExpiresAt?: number
-  }
+ account?: {
+ uid?: string
+ nickname?: string
+ uin?: string
+ type?: string
+ pluginEnabled?: boolean
+ phoneNumber?: string
+ }
+ auth?: {
+ accessToken?: string
+ tokenType?: string
+ scope?: string
+ domain?: string
+ expiresAt?: number
+ refreshExpiresAt?: number
+ }
 }
 
 interface ApiKeyOnlyPayload {
-  nickname: string
-  apiKey: string
+ nickname: string
+ apiKey: string
 }
 
 interface AccountRow {
-  id: number
-  uid: string
-  nickname: string
-  primaryCredential: string
-  apiKey: string | null
-  accessToken: string | null
-  updatedAt: number
-  credit?: CreditSnapshot
-  usage?: UsageSnapshot
-  checkin?: CheckinSnapshot
+ id: number
+ uid: string
+ nickname: string
+ primaryCredential: string
+ apiKey: string | null
+ accessToken: string | null
+ updatedAt: number
+ credit?: CreditSnapshot
+ usage?: UsageSnapshot
+ checkin?: CheckinSnapshot
+ checkinProgress?: 'pending' | 'running' | 'done' | 'error'
+}
+
+interface CheckinStreamEvent {
+ type: 'started' | 'result' | 'summary'
+ accountId: number | null
+ uid: string | null
+ nickname: string | null
+ position: number | null
+ total: number | null
+ status: string | null
+ message: string | null
+ checkinTime: number | null
+ okCount: number | null
+ alreadyCount: number | null
+ errCount: number | null
+ durationMs: number | null
 }
 
 const message = useMessage()
 
-// =====凭证详情弹窗 =====
 const showCredentialModal = ref(false)
 const credentialRow = ref<AccountRow | null>(null)
 
-function openCredentialDetail(row: AccountRow) {
-  credentialRow.value = row
-  showCredentialModal.value = true
-}
-
-// =====主弹窗：三入口选择 =====
 const showChooser = ref(false)
 
-// =====本机 /文件导入详情弹窗 =====
 const showDetail = ref(false)
 const loadingDetail = ref(false)
 const savingDetail = ref(false)
 const detailInfo = ref<WorkbuddyInfo | null>(null)
 const showAccessToken = ref(false)
 
-// =====手动输入 API Key弹窗 =====
 const showApiKeyForm = ref(false)
 const apiKeyForm = ref<ApiKeyOnlyPayload>({ nickname: '', apiKey: '' })
 const savingApiKey = ref(false)
 
-// =====表格 =====
 const searchKeyword = ref('')
 const tableData = ref<AccountRow[]>([])
+const checkingIn = ref(false)
 
-/**
- * 过滤后的表格数据：按搜索关键字（昵称 / UID）做大小写不敏感的子串匹配
- * <p>
- * 空白关键字不过滤；UID 为 '-' 的兜底行同样参与匹配
- * <p>
- * 注意：此 computed 仅在模板 `<n-data-table :data="filteredTableData">` 中被使用。
- * TS 的 noUnusedLocals 不会扫到模板引用，因此用 `// @ts-expect-error` 显式引用一次。
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const filteredTableData = computed<AccountRow[]>(() => {
-  const kw = searchKeyword.value.trim().toLowerCase()
-  if (!kw) return tableData.value
-  return tableData.value.filter((row) => {
-    const nickname = (row.nickname || '').toLowerCase()
-    const uid = (row.uid || '').toLowerCase()
-    return nickname.includes(kw) || uid.includes(kw)
-  })
-})
-
-const columns: DataTableColumns<AccountRow> = [
-  { title: '编号', key: 'id', width: 70 },
-  {
-    title: '昵称',
-    key: 'nickname',
-    width: 160,
-    render: (row) => row.nickname || '未定义',
-  },
-  {
-    title: '凭证',
-    key: 'credentials',
-    width: 220,
-    render: (row: AccountRow) => {
-      return h(NButton, {
-        quaternary: true,
-        size: 'tiny',
-        style: { fontFamily: "'SFMono-Regular',Consolas,'Liberation Mono',monospace", fontSize: '12px' },
-        onClick: () => openCredentialDetail(row),
-      }, () => row.primaryCredential || '-')
-    },
-  },
-  {
-    title: '积分剩余',
-    key: 'creditRemain',
-    width: 140,
-    render: (row: AccountRow) => {
-      if (!row.credit || !Array.isArray(row.credit.packages)) return '-'
-      const remain = row.credit.packages.reduce((s, p) => s + (p.cycleCapacityRemain || 0), 0)
-      const size = row.credit.packages.reduce((s, p) => s + (p.cycleCapacitySize || 0), 0)
-      return `${remain.toFixed(1)} / ${size.toFixed(0)}`
-    },
-  },
-  {
-    title: '本期消耗',
-    key: 'usage',
-    width: 110,
-    render: (row: AccountRow) => {
-      if (!row.usage) return '-'
-      return `${row.usage.total.toFixed(2)}积分`
-    },
-  },
-  {
-    title: '当日签到状态',
-    key: 'checkin',
-    width: 130,
-    render: (row: AccountRow) => {
-      if (!row.checkin) return h('span', { style: { color: '#999' } }, '未知')
-      return row.checkin.checkedIn
-        ? h('span', { style: { color: '#18a058', fontWeight: '500' } }, '已签到')
-        : h('span', { style: { color: '#f0a020', fontWeight: '500' } }, '未签到')
-    },
-  },
-  {
-    title: '更新时间',
-    key: 'updatedAt',
-    width: 180,
-    render: (row) => formatTime(row.updatedAt),
-  },
+// ===== 签到按钮右键菜单（强制签到） =====
+const showCheckinCtxMenu = ref(false)
+const checkinCtxMenuX = ref(0)
+const checkinCtxMenuY = ref(0)
+const checkinCtxMenuOptions = [
+ { label: '强制签到（忽略已签状态）', key: 'force-checkin' },
 ]
 
-// ===== 共享 store：账号列表 / credit / usage / checkin 全部走这里 =====
-// 多个组件调用 useAccountData() 拿到同一个 ref,数据天然共享
+function onCheckinButtonContextMenu(e: MouseEvent) {
+ e.preventDefault()
+ showCheckinCtxMenu.value = false
+ nextTick(() => {
+  checkinCtxMenuX.value = e.clientX
+  checkinCtxMenuY.value = e.clientY
+  showCheckinCtxMenu.value = true
+ })
+}
+
+function handleCheckinCtxMenuSelect(key: string) {
+ showCheckinCtxMenu.value = false
+ if (key === 'force-checkin') {
+  forceCheckin()
+ }
+}
+
+async function forceCheckin() {
+ if (checkingIn.value) return
+ const allIds = tableData.value.map((row) => row.id)
+ if (allIds.length === 0) {
+  message.info('没有账号可签到')
+  return
+ }
+ checkingIn.value = true
+ try {
+  resetCheckinProgress(allIds)
+  const res = await fetch('/api/checkin/execute-stream', {
+   method: 'POST',
+   headers: { 'Content-Type': 'application/json' },
+   body: JSON.stringify({ accountIds: allIds, force: true }),
+  })
+  if (!res.ok) {
+   message.error(`签到请求失败: ${res.status}`)
+   return
+  }
+  const freshRows: AccountRow[] = []
+  const summary = await consumeCheckinStream(res, freshRows)
+
+  tableData.value
+   .filter((row) => allIds.includes(row.id) && row.checkinProgress === 'running')
+   .forEach((row) => { row.checkinProgress = 'error' })
+
+  const parts: string[] = []
+  if (summary.okCount > 0) parts.push(`成功 ${summary.okCount}`)
+  if (summary.alreadyCount > 0) parts.push(`已签 ${summary.alreadyCount}`)
+  if (summary.errCount > 0) parts.push(`失败 ${summary.errCount}`)
+  message.success(`强制签到完成: ${parts.join(' / ') || '无变更'}`)
+
+  if (freshRows.length > 0) {
+   await refreshCreditForRows(freshRows)
+  }
+  clearFinishedCheckinProgress()
+ } catch (e) {
+  const msg = e instanceof Error ? e.message : '未知错误'
+  tableData.value
+   .filter((row) => row.checkinProgress === 'running')
+   .forEach((row) => { row.checkinProgress = 'error' })
+  message.error(`签到异常: ${msg}`)
+ } finally {
+  checkingIn.value = false
+ }
+}
+
 const accountStore = useAccountData()
 
-/**
- * 把 store 提供的扁平视图 + 本地计算字段(凭证展示)合并成表格行数据
- * <p>
- * 这是 AccountManagement 表格真正需要的数据形态:每行包含
- *   静态字段(id/uid/nickname/accountJson/accessToken/apiKey/updatedAt) +
- *   动态字段(credit/usage/checkin) +
- *   表格专用字段(primaryCredential)
- */
+function openCredentialDetail(row: AccountRow) {
+ credentialRow.value = row
+ showCredentialModal.value = true
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const filteredTableData = computed<AccountRow[]>(() => {
+ const kw = searchKeyword.value.trim().toLowerCase()
+ if (!kw) return tableData.value
+ return tableData.value.filter((row) => {
+ const nickname = (row.nickname || '').toLowerCase()
+ const uid = (row.uid || '').toLowerCase()
+ return nickname.includes(kw) || uid.includes(kw)
+ })
+})
+
+const checkinButtonLabel = computed(() => checkingIn.value ? '签到进行中…' : '一键每日签到')
+
+const columns: DataTableColumns<AccountRow> = [
+ { title: '编号', key: 'id', width:70 },
+ {
+ title: '昵称',
+ key: 'nickname',
+ width:160,
+ render: (row) => row.nickname || '未定义',
+ },
+ {
+ title: '凭证',
+ key: 'credentials',
+ width:220,
+ render: (row: AccountRow) => h(NButton, {
+ quaternary: true,
+ size: 'tiny',
+ style: { fontFamily: "'SFMono-Regular',Consolas,'Liberation Mono',monospace", fontSize: '12px' },
+ onClick: () => openCredentialDetail(row),
+ }, () => row.primaryCredential || '-'),
+ },
+ {
+ title: '积分剩余',
+ key: 'creditRemain',
+ width:140,
+ render: (row: AccountRow) => {
+ if (!row.credit || !Array.isArray(row.credit.packages)) return '-'
+ const remain = row.credit.packages.reduce((s, p) => s + (p.cycleCapacityRemain ||0),0)
+ const size = row.credit.packages.reduce((s, p) => s + (p.cycleCapacitySize ||0),0)
+ return `${remain.toFixed(1)} / ${size.toFixed(0)}`
+ },
+ },
+ {
+ title: '本期消耗',
+ key: 'usage',
+ width:110,
+ render: (row: AccountRow) => {
+ if (!row.usage) return '-'
+ return `${row.usage.total.toFixed(2)}积分`
+ },
+ },
+ {
+ title: '当日签到状态',
+ key: 'checkin',
+ width:160,
+ render: (row: AccountRow) => {
+ if (row.checkinProgress === 'running') {
+ return h('span', { style: { color: '#2080f0', fontWeight: '500' } }, '签到中…')
+ }
+ if (row.checkinProgress === 'error') {
+ return h('span', { style: { color: '#d03050', fontWeight: '500' } }, '签到失败')
+ }
+ if (!row.checkin) {
+ return h('span', { style: { color: '#999' } }, '未知')
+ }
+ return row.checkin.checkedIn
+ ? h('span', { style: { color: '#18a058', fontWeight: '500' } }, '已签到')
+ : h('span', { style: { color: '#f0a020', fontWeight: '500' } }, '未签到')
+ },
+ },
+ {
+ title: '更新时间',
+ key: 'updatedAt',
+ width:180,
+ render: (row: AccountRow) => formatTime(row.updatedAt),
+ },
+]
+
 function buildRows(): AccountRow[] {
-  return accountStore.view.map((v: AccountDataView) => ({
-    id: v.id,
-    uid: v.uid,
-    nickname: v.nickname,
-    primaryCredential: pickPrimaryCredential(v.apiKey, v.accessToken),
-    apiKey: v.accessToken ? null : v.apiKey, // 兼容原 AccountRow 字段(apiKey / accessToken 二选一)
-    accessToken: v.accessToken,
-    updatedAt: v.updatedAt,
-    credit: v.credit ?? undefined,
-    usage: v.usage ?? undefined,
-    checkin: v.checkin ?? undefined,
-  }))
+ return accountStore.view.map((v: AccountDataView) => ({
+ id: v.id,
+ uid: v.uid,
+ nickname: v.nickname,
+ primaryCredential: pickPrimaryCredential(v.apiKey, v.accessToken),
+ apiKey: v.accessToken ? null : v.apiKey,
+ accessToken: v.accessToken,
+ updatedAt: v.updatedAt,
+ credit: v.credit ?? undefined,
+ usage: v.usage ?? undefined,
+ checkin: v.checkin ?? undefined,
+ checkinProgress: undefined,
+ }))
 }
 
 async function loadAccounts() {
-  // 委派给 store:它会读 localStorage 缓存 + 后台异步刷新 + 跨 tab 同步
-  await accountStore.ensureAccountsLoaded()
-  // store 拉到的列表同步给表格。注意这里不用再调 setCachedAccounts,
-  // store 内部的 fetchAccountsFromServer 已经写过一次缓存
-  tableData.value = buildRows()
+ await accountStore.ensureAccountsLoaded()
+ tableData.value = buildRows()
 }
 
 async function refreshExtras() {
-  await accountStore.ensureExtrasLoaded()
-  // 后台异步刷新后,store 内部已写好 localStorage,重新读一次 ref
-  tableData.value = buildRows()
-  message.success('积分、用量信息已刷新')
+ await accountStore.ensureExtrasLoaded()
+ tableData.value = buildRows()
+ message.success('积分、用量信息已刷新')
 }
 
 function pickPrimaryCredential(apiKey?: string | null, accessToken?: string | null): string {
-  if (apiKey && apiKey.trim()) return `APIKey ${maskToken(apiKey)}`
-  if (accessToken && accessToken.trim()) return `Access ${maskToken(accessToken)}`
-  return '-'
+ if (apiKey && apiKey.trim()) return `APIKey ${maskToken(apiKey)}`
+ if (accessToken && accessToken.trim()) return `Access ${maskToken(accessToken)}`
+ return '-'
 }
 
 function maskToken(token: string): string {
-  if (!token) return '-'
-  if (token.length <= 12) return token
-  return token.slice(0, 6) + '…' + token.slice(-4)
+ if (!token) return '-'
+ if (token.length <=12) return token
+ return token.slice(0,6) + '…' + token.slice(-4)
 }
 
 function formatTime(ts: number | null | undefined): string {
-  if (!ts) return '-'
-  return new Date(ts).toLocaleString('zh-CN')
+ if (!ts) return '-'
+ return new Date(ts).toLocaleString('zh-CN')
 }
 
-// ======== 签到状态 ========
-
-const checkingIn = ref(false)
-
-/**
- * 当前已加载的账号是否全部已签到
- * <p>
- * 没有 checkin 字段的账号视为"未签到"（保守判定，避免误禁）
- * 没有账号时返回 false（按钮可点击但不会触发任何请求）
- */
 const allCheckedIn = computed(() => {
-  if (tableData.value.length === 0) return false
-  return tableData.value.every((row) => row.checkin?.checkedIn === true)
+ if (tableData.value.length ===0) return false
+ return tableData.value.every((row) => row.checkin?.checkedIn === true)
 })
 
-/**
- * 拉取并合并签到状态
- * <p>
- * 委派给 store:它内部判断哪些 uid 缺 checkin 快照,只请求缺失的
- * <p>
- * 后端会按本地 checkin_log 表 + 当日时间窗自动判定，返回 checkedIn
- */
 async function queryCheckinStatus() {
-  await accountStore.ensureCheckinLoaded()
-  // store 写完 localStorage 后,tableData 也需要重读一次让列立刻反映
-  tableData.value = buildRows()
+ await accountStore.ensureCheckinLoaded()
+ tableData.value = buildRows()
 }
 
-/**
- * 一键每日签到
- * <p>
- * 收集所有 checkedIn !== true 的账号，串行发往后端 /api/checkin/execute
- * 结果合并到表格 + 落 localStorage
- */
 async function oneClickCheckin() {
-  if (checkingIn.value) return
-  const targets = tableData.value
-    .filter((r) => r.checkin?.checkedIn !== true)
-    .map((r) => r.id as number)
-  if (targets.length === 0) {
-    message.info('所有账号今日已签到')
-    return
-  }
-  checkingIn.value = true
-  try {
-    const res = await fetch('/api/checkin/execute', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accountIds: targets }),
-    })
-    if (!res.ok) {
-      message.error(`签到请求失败: ${res.status}`)
-      return
-    }
-    const body = await res.json()
-    const results: any[] = body?.data || []
-    let okCount = 0
-    let alreadyCount = 0
-    let errCount = 0
-    const freshRows: AccountRow[] = []
-    for (const r of results) {
-      const row = tableData.value.find((x) => x.id === r.accountId)
-      if (!row) continue
-      const isOk = r.status === 'checked_in' || r.status === 'already_checked_in'
-      if (isOk) {
-        const snap: CheckinSnapshot = {
-          checkedIn: true,
-          checkinTime: Date.now(),
-          checkinType: 'daily',
-          fetchedAt: Date.now(),
-        }
-        row.checkin = snap
-        if (row.uid && row.uid !== '-') accountStore.setLocalCheckin(row.uid, snap)
-        // 仅收集本次"新签到成功"的账号（already_checked_in 不刷，因为上游没返新积分）
-        if (r.status === 'checked_in') {
-          freshRows.push(row)
-          okCount++
-        } else {
-          alreadyCount++
-        }
-      } else {
-        errCount++
-        message.warning(`账号 ${row.nickname || r.uid} 签到失败: ${r.message || '未知错误'}`)
-      }
-    }
-    const parts: string[] = []
-    if (okCount > 0) parts.push(`成功 ${okCount}`)
-    if (alreadyCount > 0) parts.push(`已签 ${alreadyCount}`)
-    if (errCount > 0) parts.push(`失败 ${errCount}`)
-    message.success(`签到完成: ${parts.join(' / ')}`)
-    // 签到成功后立即刷新本次新签成功账号的积分剩余（不刷已签过的、也不刷失败的）
-    if (freshRows.length > 0) {
-      await refreshCreditForRows(freshRows)
-    }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : '未知错误'
-    message.error(`签到异常: ${msg}`)
-  } finally {
-    checkingIn.value = false
-  }
+ if (checkingIn.value) return
+ const targets = tableData.value
+ .filter((row) => row.checkin?.checkedIn !== true)
+ .map((row) => row.id)
+ if (targets.length ===0) {
+ message.info('所有账号今日已签到')
+ return
+ }
+
+ checkingIn.value = true
+ try {
+ resetCheckinProgress(targets)
+ const res = await fetch('/api/checkin/execute-stream', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ accountIds: targets }),
+ })
+ if (!res.ok) {
+ message.error(`签到请求失败: ${res.status}`)
+ return
+ }
+
+ const freshRows: AccountRow[] = []
+ const summary = await consumeCheckinStream(res, freshRows)
+
+ tableData.value
+ .filter((row) => targets.includes(row.id) && row.checkinProgress === 'running')
+ .forEach((row) => {
+ row.checkinProgress = 'error'
+ })
+
+ const parts: string[] = []
+ if (summary.okCount >0) parts.push(`成功 ${summary.okCount}`)
+ if (summary.alreadyCount >0) parts.push(`已签 ${summary.alreadyCount}`)
+ if (summary.errCount >0) parts.push(`失败 ${summary.errCount}`)
+ message.success(`签到完成: ${parts.join(' / ') || '无变更'}`)
+
+ if (freshRows.length >0) {
+ await refreshCreditForRows(freshRows)
+ }
+ clearFinishedCheckinProgress()
+ } catch (e) {
+ const msg = e instanceof Error ? e.message : '未知错误'
+ tableData.value
+ .filter((row) => row.checkinProgress === 'running')
+ .forEach((row) => {
+ row.checkinProgress = 'error'
+ })
+ message.error(`签到异常: ${msg}`)
+ } finally {
+ checkingIn.value = false
+ }
 }
 
-/**
- * 仅刷新指定账号行列表的"积分剩余"（user-resource），不刷 usage、不弹全局成功提示
- * <p>
- * 委派给 store.refreshOne(uid):store 内部按 uid 拉单条 credit
- * <p>
- * 用于：一键签到后只对"本次新签到成功"的账号拉最新积分数据，立即看到新加的积分
- */
+function resetCheckinProgress(targetIds: number[]): void {
+ tableData.value.forEach((row) => {
+ if (targetIds.includes(row.id)) {
+ row.checkinProgress = 'pending'
+ }
+ })
+}
+
+function clearFinishedCheckinProgress(): void {
+ tableData.value.forEach((row) => {
+ if (row.checkinProgress === 'done') {
+ row.checkinProgress = undefined
+ }
+ })
+}
+
+async function consumeCheckinStream(
+ res: Response,
+ freshRows: AccountRow[]
+): Promise<{ okCount: number, alreadyCount: number, errCount: number }> {
+ if (!res.body) {
+ throw new Error('签到流响应为空')
+ }
+
+ const reader = res.body.getReader()
+ const decoder = new TextDecoder()
+ let buffer = ''
+ let summary = { okCount:0, alreadyCount:0, errCount:0 }
+
+ while (true) {
+ const { done, value } = await reader.read()
+ buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+ const lines = buffer.split('\n')
+ buffer = lines.pop() ?? ''
+
+ for (const rawLine of lines) {
+ const line = rawLine.trim()
+ if (!line) continue
+ summary = handleCheckinStreamEvent(line, freshRows, summary)
+ }
+
+ if (done) {
+ const tail = buffer.trim()
+ if (tail) {
+ summary = handleCheckinStreamEvent(tail, freshRows, summary)
+ }
+ break
+ }
+ }
+
+ return summary
+}
+
+function handleCheckinStreamEvent(
+ raw: string,
+ freshRows: AccountRow[],
+ summary: { okCount: number, alreadyCount: number, errCount: number }
+): { okCount: number, alreadyCount: number, errCount: number } {
+ const evt = JSON.parse(raw) as CheckinStreamEvent
+ if (evt.type === 'started') {
+ applyCheckinStarted(evt)
+ return summary
+ }
+ if (evt.type === 'result') {
+ applyCheckinResult(evt, freshRows)
+ return summary
+ }
+ return {
+ okCount: evt.okCount ??0,
+ alreadyCount: evt.alreadyCount ??0,
+ errCount: evt.errCount ??0,
+ }
+}
+
+function applyCheckinStarted(evt: CheckinStreamEvent): void {
+ const row = tableData.value.find((item) => item.id === evt.accountId)
+ if (!row) return
+ row.checkinProgress = 'running'
+}
+
+function applyCheckinResult(evt: CheckinStreamEvent, freshRows: AccountRow[]): void {
+ const row = tableData.value.find((item) => item.id === evt.accountId)
+ if (!row) return
+
+ const isOk = evt.status === 'checked_in' || evt.status === 'already_checked_in'
+ if (isOk) {
+ const snap: CheckinSnapshot = {
+ checkedIn: true,
+ checkinTime: evt.checkinTime ?? Date.now(),
+ checkinType: 'daily',
+ fetchedAt: Date.now(),
+ }
+ row.checkin = snap
+ row.checkinProgress = 'done'
+ if (row.uid && row.uid !== '-') {
+ accountStore.setLocalCheckin(row.uid, snap)
+ }
+ if (evt.status === 'checked_in') {
+ freshRows.push(row)
+ }
+ return
+ }
+
+ row.checkinProgress = 'error'
+ message.warning(`账号 ${row.nickname || evt.uid || '-'} 签到失败: ${evt.message || '未知错误'}`)
+}
+
 async function refreshCreditForRows(rows: AccountRow[]) {
-  if (rows.length === 0) return
-  await Promise.allSettled(rows.map((row) => accountStore.refreshOne(row.uid)))
-  // store 写完 localStorage 后,tableData 也需要重读一次让列立刻反映
-  tableData.value = buildRows()
-  // 触发 filteredTableData 重新计算（仅被模板使用，TS 看不到模板引用）
-  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-  filteredTableData.value
+ if (rows.length ===0) return
+ await Promise.allSettled(rows.map((row) => accountStore.refreshOne(row.uid)))
+ tableData.value = buildRows()
+ filteredTableData.value
 }
-
-// ========添加账户 ========
 
 function openChooser() {
-  showChooser.value = true
-  detailInfo.value = null
-  apiKeyForm.value = { nickname: '', apiKey: '' }
+ showChooser.value = true
+ detailInfo.value = null
+ apiKeyForm.value = { nickname: '', apiKey: '' }
 }
 
 async function loadFromLocal() {
-  showChooser.value = false
-  showDetail.value = true
-  loadingDetail.value = true
-  await queryCheckinStatus()
-  detailInfo.value = null
-  showAccessToken.value = false
-  try {
-    const res = await fetch('/api/workbuddy-info')
-    if (!res.ok) throw new Error(`请求失败: ${res.status}`)
-    detailInfo.value = await res.json()
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : '未知错误'
-    message.error(`获取本机信息失败: ${msg}`)
-    showDetail.value = false
-  } finally {
-    loadingDetail.value = false
-  }
+ showChooser.value = false
+ showDetail.value = true
+ loadingDetail.value = true
+ await queryCheckinStatus()
+ detailInfo.value = null
+ showAccessToken.value = false
+ try {
+ const res = await fetch('/api/workbuddy-info')
+ if (!res.ok) throw new Error(`请求失败: ${res.status}`)
+ detailInfo.value = await res.json()
+ } catch (e: unknown) {
+ const msg = e instanceof Error ? e.message : '未知错误'
+ message.error(`获取本机信息失败: ${msg}`)
+ showDetail.value = false
+ } finally {
+ loadingDetail.value = false
+ }
 }
 
 async function handleFileUpload({ file }: { file: UploadFileInfo }) {
-  if (!file.file) return false
-  showChooser.value = false
-  showDetail.value = true
-  loadingDetail.value = true
-  detailInfo.value = null
-  showAccessToken.value = false
-  try {
-    const form = new FormData()
-    form.append('file', file.file)
-    const res = await fetch('/api/import-info', { method: 'POST', body: form })
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}))
-      throw new Error(errBody?.message || `请求失败: ${res.status}`)
-    }
-    detailInfo.value = await res.json()
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : '未知错误'
-    message.error(`文件导入失败: ${msg}`)
-    showDetail.value = false
-  } finally {
-    loadingDetail.value = false
-  }
-  return false
+ if (!file.file) return false
+ showChooser.value = false
+ showDetail.value = true
+ loadingDetail.value = true
+ detailInfo.value = null
+ showAccessToken.value = false
+ try {
+ const form = new FormData()
+ form.append('file', file.file)
+ const res = await fetch('/api/import-info', { method: 'POST', body: form })
+ if (!res.ok) {
+ const errBody = await res.json().catch(() => ({}))
+ throw new Error(errBody?.message || `请求失败: ${res.status}`)
+ }
+ detailInfo.value = await res.json()
+ } catch (e: unknown) {
+ const msg = e instanceof Error ? e.message : '未知错误'
+ message.error(`文件导入失败: ${msg}`)
+ showDetail.value = false
+ } finally {
+ loadingDetail.value = false
+ }
+ return false
 }
 
 function openApiKeyForm() {
-  showChooser.value = false
-  apiKeyForm.value = { nickname: '', apiKey: '' }
-  showApiKeyForm.value = true
+ showChooser.value = false
+ apiKeyForm.value = { nickname: '', apiKey: '' }
+ showApiKeyForm.value = true
 }
 
 async function saveApiKeyOnly() {
-  if (!apiKeyForm.value.apiKey.trim()) {
-    message.warning('请输入 API Key')
-    return
-  }
-  savingApiKey.value = true
-  try {
-    const payload = {
-      account: { nickname: apiKeyForm.value.nickname.trim() || undefined },
-      apiKey: apiKeyForm.value.apiKey.trim(),
-    }
-    const res = await fetch('/api/accounts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    const body = await res.json().catch(() => ({}))
-    if (res.ok) {
-      const status = body.status as string
-      const text = status === 'created' ? '新建成功' : status === 'updated' ? '已覆盖旧记录' : '保存成功'
-      message.success(text)
-      showApiKeyForm.value = false
-      await loadAccounts()
-    } else if (res.status === 409) {
-      message.warning('该 API Key已存在，未发生变化，无需重复保存')
-    } else {
-      const msg = body?.message || `请求失败: ${res.status}`
-      message.error(`保存失败: ${msg}`)
-    }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : '未知错误'
-    message.error(`保存失败: ${msg}`)
-  } finally {
-    savingApiKey.value = false
-  }
+ if (!apiKeyForm.value.apiKey.trim()) {
+ message.warning('请输入 API Key')
+ return
+ }
+ savingApiKey.value = true
+ try {
+ const payload = {
+ account: { nickname: apiKeyForm.value.nickname.trim() || undefined },
+ apiKey: apiKeyForm.value.apiKey.trim(),
+ }
+ const res = await fetch('/api/accounts', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify(payload),
+ })
+ const body = await res.json().catch(() => ({}))
+ if (res.ok) {
+ const status = body.status as string
+ const text = status === 'created' ? '新建成功' : status === 'updated' ? '已覆盖旧记录' : '保存成功'
+ message.success(text)
+ showApiKeyForm.value = false
+ await loadAccounts()
+ } else if (res.status ===409) {
+ message.warning('该 API Key已存在，未发生变化，无需重复保存')
+ } else {
+ const msg = body?.message || `请求失败: ${res.status}`
+ message.error(`保存失败: ${msg}`)
+ }
+ } catch (e: unknown) {
+ const msg = e instanceof Error ? e.message : '未知错误'
+ message.error(`保存失败: ${msg}`)
+ } finally {
+ savingApiKey.value = false
+ }
 }
 
 function cancelDetail() {
-  showDetail.value = false
-  detailInfo.value = null
+ showDetail.value = false
+ detailInfo.value = null
 }
 
 async function saveDetail() {
-  if (!detailInfo.value) return
-  savingDetail.value = true
-  try {
-    const res = await fetch('/api/accounts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(detailInfo.value),
-    })
-    const body = await res.json().catch(() => ({}))
-    if (res.ok) {
-      const status = body.status as string
-      const text = status === 'created' ? '新建成功' : status === 'updated' ? '已覆盖旧记录' : '保存成功'
-      message.success(text)
-      showDetail.value = false
-      detailInfo.value = null
-      await loadAccounts()
-    } else if (res.status === 409) {
-      message.warning('该账户信息已存在且未发生变化，无需重复保存')
-    } else {
-      const msg = body?.message || `请求失败: ${res.status}`
-      message.error(`保存失败: ${msg}`)
-    }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : '未知错误'
-    message.error(`保存失败: ${msg}`)
-  } finally {
-    savingDetail.value = false
-  }
+ if (!detailInfo.value) return
+ savingDetail.value = true
+ try {
+ const res = await fetch('/api/accounts', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify(detailInfo.value),
+ })
+ const body = await res.json().catch(() => ({}))
+ if (res.ok) {
+ const status = body.status as string
+ const text = status === 'created' ? '新建成功' : status === 'updated' ? '已覆盖旧记录' : '保存成功'
+ message.success(text)
+ showDetail.value = false
+ detailInfo.value = null
+ await loadAccounts()
+ } else if (res.status ===409) {
+ message.warning('该账户信息已存在且未发生变化，无需重复保存')
+ } else {
+ const msg = body?.message || `请求失败: ${res.status}`
+ message.error(`保存失败: ${msg}`)
+ }
+ } catch (e: unknown) {
+ const msg = e instanceof Error ? e.message : '未知错误'
+ message.error(`保存失败: ${msg}`)
+ } finally {
+ savingDetail.value = false
+ }
 }
 
 onMounted(async () => {
-  await loadAccounts()
-  await refreshExtras()
-  await queryCheckinStatus()
+ await loadAccounts()
+ await refreshExtras()
+ await queryCheckinStatus()
 })
 </script>
 
@@ -499,9 +640,20 @@ onMounted(async () => {
           :disabled="allCheckedIn || checkingIn"
           :loading="checkingIn"
           @click="oneClickCheckin"
+          @contextmenu="onCheckinButtonContextMenu"
         >
-          一键每日签到
+         {{ checkinButtonLabel }}
         </n-button>
+        <n-dropdown
+          trigger="manual"
+          placement="bottom-start"
+          :show="showCheckinCtxMenu"
+          :options="checkinCtxMenuOptions"
+          :x="checkinCtxMenuX"
+          :y="checkinCtxMenuY"
+          @select="handleCheckinCtxMenuSelect"
+          @clickoutside="showCheckinCtxMenu = false"
+        />
         <n-button type="primary" @click="openChooser">
           <template #icon>
             <Icon name="plus" :size="14" />
@@ -512,7 +664,7 @@ onMounted(async () => {
     </div>
 
     <n-card :bordered="false" class="table-card">
-      <n-data-table :columns="columns" :data="tableData" :bordered="false" :single-line="false" size="small"
+       <n-data-table :columns="columns" :data="filteredTableData" :bordered="false" :single-line="false" size="small"
         :row-key="(row: AccountRow) => row.id" />
     </n-card>
 
