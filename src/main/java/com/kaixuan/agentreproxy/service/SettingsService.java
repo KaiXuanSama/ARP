@@ -142,6 +142,20 @@ public class SettingsService {
     }
 
     /**
+     * 流量包候选的选择模式
+     * <ul>
+     * <li>{@code EXPIRING} —— 到期时间最早优先</li>
+     * <li>{@code LEAST} ——余量最少优先</li>
+     * <li>{@code MOST} ——余量最多优先</li>
+     * </ul>
+     */
+    private enum PackagePickMode {
+        EXPIRING,
+        LEAST,
+        MOST
+    }
+
+    /**
      * “临期优先”账号选择器
      * <p>
      * 数据来源：SQLite {@code workbuddy_account.extra.credit.packages}（Billing 快照）
@@ -156,7 +170,7 @@ public class SettingsService {
      * 若所有账号都没有可用的流量包快照，返回400，引导用户先刷新积分。
      */
     public Long resolveExpiringPriorityChatAccountId() {
-        return selectExpiringPackage()
+        return selectPackageCandidate(PackagePickMode.EXPIRING)
                 .map(picked -> {
                     // 打印选中的账号信息,便于排查"为什么这次请求走了这个账号"
                     log.info(
@@ -173,14 +187,62 @@ public class SettingsService {
     }
 
     /**
+     * “量少优先”账号选择器
+     * <p>
+     * 从所有账号的 credit.packages 中聚合 {@code Σ cycleCapacityRemain},
+     * 选出"剩余全部积分"最少的账号.
+     * <p>
+     * 与“临期优先”的差异:这里以"账号"为粒度,不是按单个包。
+     * 用户的“量”指该账号的剩余全部积分(所有 flow 包余量之和),
+     * 同一个账号多个包之间不再做更细区分。
+     */
+    public Long resolveLeastPriorityChatAccountId() {
+        return selectAccountByTotalRemain(PackagePickMode.LEAST)
+                .map(picked -> {
+                    log.info(
+                            "[chat.consumption=least] 选中账号 accountId={}, uid={}, totalRemain={}",
+                            picked.accountId(), picked.uid(), picked.cycleCapacityRemain());
+                    return picked.accountId();
+                })
+                .orElseThrow(() -> {
+                    log.warn("[chat.consumption=least] 没有可用的量少优先账号:扫描了 0 个候选");
+                    return new IllegalArgumentException(
+                            "当前没有可用的量少优先账号，请先刷新积分数据并确认账号仍有余量");
+                });
+    }
+
+    /**
+     * “量大优先”账号选择器
+     * <p>
+     * 从所有账号的 credit.packages 中聚合 {@code Σ cycleCapacityRemain},
+     * 选出"剩余全部积分"最多的账号.
+     * <p>
+     * 与“量少优先”同粒度,排序方向相反。
+     */
+    public Long resolveMostPriorityChatAccountId() {
+        return selectAccountByTotalRemain(PackagePickMode.MOST)
+                .map(picked -> {
+                    log.info(
+                            "[chat.consumption=most] 选中账号 accountId={}, uid={}, totalRemain={}",
+                            picked.accountId(), picked.uid(), picked.cycleCapacityRemain());
+                    return picked.accountId();
+                })
+                .orElseThrow(() -> {
+                    log.warn("[chat.consumption=most] 没有可用的量大优先账号:扫描了 0 个候选");
+                    return new IllegalArgumentException(
+                            "当前没有可用的量大优先账号，请先刷新积分数据并确认账号仍有余量");
+                });
+    }
+
+    /**
      * 预览模式:在不真正修改 {@code chat.consumption} 设置的情况下,
      * 返回"如果按当前 mode 路由,后端会选哪个账号"等诊断信息.
      * <p>
      * 当前实现:
      * <ul>
-     *   <li>{@code expiring} —— 返回最先过期且余量&gt;0 的包所属账号</li>
-     *   <li>{@code least} / {@code most} —— 暂未实现,抛 400</li>
-     *   <li>{@code designated} —— 没有"预览"语义(直接读设置里的 accountId),抛 400</li>
+     * <li>{@code expiring} —— 返回最先过期且余量&gt;0 的包所属账号</li>
+     * <li>{@code least} / {@code most} —— 暂未实现,抛 400</li>
+     * <li>{@code designated} —— 没有"预览"语义(直接读设置里的 accountId),抛 400</li>
      * </ul>
      * 该方法内部跑 JDBC + extra JSON 解析,调用方需要在 boundedElastic 线程池里调
      */
@@ -188,7 +250,7 @@ public class SettingsService {
         String normalized = mode == null ? "" : mode.trim();
         return switch (normalized) {
             case "expiring" -> {
-                ExpiringPackageCandidate picked = selectExpiringPackage().orElseThrow(() -> {
+                ExpiringPackageCandidate picked = selectPackageCandidate(PackagePickMode.EXPIRING).orElseThrow(() -> {
                     log.warn("[preview chat.consumption=expiring] 没有可用的临期流量包账号");
                     return new IllegalArgumentException(
                             "当前没有可用的临期流量包账号，请先刷新积分数据并确认账号仍有余量");
@@ -205,9 +267,41 @@ public class SettingsService {
                         picked.cycleEndTime(),
                         picked.cycleCapacityRemain());
             }
-            case "least", "most" ->
-                throw new IllegalArgumentException(
-                        "当前仅支持“临期优先”的预览,其余消耗方式暂未实现: " + normalized);
+            case "least" -> {
+                ExpiringPackageCandidate picked = selectAccountByTotalRemain(PackagePickMode.LEAST).orElseThrow(() -> {
+                    log.warn("[preview chat.consumption=least] 没有可用的量少优先账号");
+                    return new IllegalArgumentException(
+                            "当前没有可用的量少优先账号，请先刷新积分数据并确认账号仍有余量");
+                });
+                // 账号粒度选中,无单一 packageCode / cycleEndTime;totalRemain 反映账号总余量
+                log.info(
+                        "[preview chat.consumption=least] 选中账号 accountId={}, uid={}, totalRemain={}",
+                        picked.accountId(), picked.uid(), picked.cycleCapacityRemain());
+                yield new ChatAccountPreview(
+                        picked.accountId(),
+                        picked.uid(),
+                        "least",
+                        null, // 账号粒度:无单一包 code
+                        null, // 账号粒度:无单一到期时间
+                        picked.cycleCapacityRemain());
+            }
+            case "most" -> {
+                ExpiringPackageCandidate picked = selectAccountByTotalRemain(PackagePickMode.MOST).orElseThrow(() -> {
+                    log.warn("[preview chat.consumption=most] 没有可用的量大优先账号");
+                    return new IllegalArgumentException(
+                            "当前没有可用的量大优先账号，请先刷新积分数据并确认账号仍有余量");
+                });
+                log.info(
+                        "[preview chat.consumption=most] 选中账号 accountId={}, uid={}, totalRemain={}",
+                        picked.accountId(), picked.uid(), picked.cycleCapacityRemain());
+                yield new ChatAccountPreview(
+                        picked.accountId(),
+                        picked.uid(),
+                        "most",
+                        null,
+                        null,
+                        picked.cycleCapacityRemain());
+            }
             case "designated" ->
                 throw new IllegalArgumentException(
                         "“指定模式”没有预览语义,请直接读取 GET /api/settings/chat.consumption");
@@ -217,13 +311,34 @@ public class SettingsService {
     }
 
     /**
-     * 内部:从所有账号的 credit.packages 中选出"最先到期且余量&gt;0"的包.
+     * 内部:从所有账号中选出符合模式的"目标".
      * <p>
+     * 两种粒度:
+     * <ul>
+     * <li>{@link PackagePickMode#EXPIRING} —— 单包粒度,选"最先过期且余量&gt;0"的包所属账号</li>
+     * <li>{@link PackagePickMode#LEAST} / {@link PackagePickMode#MOST} —— 账号粒度,
+     * 按"账号全部包余量求和"升序/降序选账号</li>
+     * </ul>
      * 不抛异常 —— 找不到时返回空 Optional,由调用方决定如何提示.
-     * 这是给 {@link #resolveExpiringPriorityChatAccountId()} 和
+     * 这是给 {@link #resolveExpiringPriorityChatAccountId()} /
+     * {@link #resolveLeastPriorityChatAccountId()} /
+     * {@link #resolveMostPriorityChatAccountId()} /
      * {@link #previewChatAccountId(String)} 共用的核心选择器.
      */
-    private java.util.Optional<ExpiringPackageCandidate> selectExpiringPackage() {
+    private java.util.Optional<ExpiringPackageCandidate> selectPackageCandidate(PackagePickMode mode) {
+        if (mode == PackagePickMode.EXPIRING) {
+            return selectEarliestExpiringPackage();
+        }
+        return selectAccountByTotalRemain(mode);
+    }
+
+    /**
+     * 临期优先:扫描所有账号的所有正余量包,按 {@code cycleEndTime} 升序,取最先到期的包所属账号.
+     * <p>
+     * 粒度到"包"——临期场景下,同一个账号的多个包中"最先过期"的那个就是这次最该消费的;
+     * 选到账号后,该账号整体作为路由目标
+     */
+    private java.util.Optional<ExpiringPackageCandidate> selectEarliestExpiringPackage() {
         List<ExpiringPackageCandidate> candidates = new ArrayList<>();
         for (WorkbuddyAccountRecord acc : accountRepository.findAll()) {
             if (acc.id() == null || !hasUsableCredential(acc)) {
@@ -231,13 +346,55 @@ public class SettingsService {
             }
             candidates.addAll(readPositiveCreditPackages(acc));
         }
-
-        candidates.sort(Comparator
-                .comparing(ExpiringPackageCandidate::cycleEndTime)
-                .thenComparing(ExpiringPackageCandidate::accountId)
-                .thenComparing(c -> c.packageCode() == null ? "" : c.packageCode()));
-
+        candidates.sort(comparatorFor(PackagePickMode.EXPIRING));
         return candidates.stream().findFirst();
+    }
+
+    /**
+     * 量少优先 / 量大优先:按"账号全部包余量求和"为粒度,选总余量最小/最大的账号.
+     * <p>
+     * 设计依据:用户的"量"指的是该账号"剩余的全部积分"(即所有 flow 包余量之和),
+     * 而不是某个特定包。同一账号多个包之间不做更细区分 —— 路由一旦确定走哪个账号,
+     * 上游如何扣减是上游的事。
+     * <p>
+     * 返回的 {@code ExpiringPackageCandidate} 借用了 record 结构但字段语义不一样:
+     * <ul>
+     * <li>{@code cycleEndTime} = null(账号粒度无单一到期时间)</li>
+     * <li>{@code packageCode} = null(无单一命中包)</li>
+     * <li>{@code cycleCapacityRemain} = 该账号的
+     * {@code Σ packages.cycleCapacityRemain}</li>
+     * </ul>
+     * 这是为了复用 record 不增加新的内部类。调用方拿到的 preview 会把这些字段当 null 处理。
+     */
+    private java.util.Optional<ExpiringPackageCandidate> selectAccountByTotalRemain(PackagePickMode mode) {
+        List<ExpiringPackageCandidate> accountSummaries = new ArrayList<>();
+        for (WorkbuddyAccountRecord acc : accountRepository.findAll()) {
+            if (acc.id() == null || !hasUsableCredential(acc)) {
+                continue;
+            }
+            // 聚合:该账号所有"余量 > 0"包的 cycleCapacityRemain 之和
+            double totalRemain = 0D;
+            boolean hasAnyPositivePackage = false;
+            for (Map<String, Object> pkg : readCreditPackageMaps(acc)) {
+                double remain = asDouble(pkg.get("cycleCapacityRemain"), 0D);
+                if (remain > 0D) {
+                    totalRemain += remain;
+                    hasAnyPositivePackage = true;
+                }
+            }
+            if (!hasAnyPositivePackage) {
+                // 没有任何正余量包的账号不参与"量"比较 —— 否则所有 0 都会并列
+                continue;
+            }
+            accountSummaries.add(new ExpiringPackageCandidate(
+                    acc.id(),
+                    acc.uid(),
+                    null, // 账号粒度无单一 packageCode
+                    null, // 账号粒度无单一 cycleEndTime
+                    totalRemain));
+        }
+        accountSummaries.sort(comparatorFor(mode));
+        return accountSummaries.stream().findFirst();
     }
 
     // ============== 写(只暴露 chat.consumption 这一个 key,避免泛 key 写入带来的校验扩散)
@@ -317,8 +474,8 @@ public class SettingsService {
         return switch (mode) {
             case "designated" -> resolveDesignatedChatAccountId(setting);
             case "expiring" -> resolveExpiringPriorityChatAccountId();
-            case "least", "most" ->
-                throw new IllegalArgumentException("当前仅支持“指定模式 / 临期优先”，其余消耗方式暂未实现");
+            case "least" -> resolveLeastPriorityChatAccountId();
+            case "most" -> resolveMostPriorityChatAccountId();
             default -> throw new IllegalArgumentException("未知的对话消耗方式: " + mode);
         };
     }
@@ -339,7 +496,16 @@ public class SettingsService {
                 || (acc.apiKey() != null && !acc.apiKey().isBlank());
     }
 
-    private List<ExpiringPackageCandidate> readPositiveCreditPackages(WorkbuddyAccountRecord acc) {
+    /**
+     * 解析 {@code extra.credit.packages} 原始 map 列表.
+     * <p>
+     * 跟 {@link #readPositiveCreditPackages} 共享 extra JSON 解析逻辑;
+     * 不做"余量&gt;0"和"到期时间合法"过滤,留给调用方按需使用 —— {@code expiring} 需要过滤,
+     * {@code least/most} 要聚合所有包(包括 0 余量)所以不过滤.
+     * <p>
+     * 解析失败时返回空列表(不抛),由调用方决定如何提示.
+     */
+    private List<Map<String, Object>> readCreditPackageMaps(WorkbuddyAccountRecord acc) {
         if (acc.extra() == null || acc.extra().isBlank()) {
             return List.of();
         }
@@ -359,8 +525,7 @@ public class SettingsService {
             if (!(packagesObj instanceof List<?> packages)) {
                 return List.of();
             }
-
-            List<ExpiringPackageCandidate> out = new ArrayList<>();
+            List<Map<String, Object>> out = new ArrayList<>();
             for (Object pkgObj : packages) {
                 if (!(pkgObj instanceof Map<?, ?> pkgRaw)) {
                     continue;
@@ -369,24 +534,7 @@ public class SettingsService {
                 if (pkg == null) {
                     continue;
                 }
-
-                double remain = asDouble(pkg.get("cycleCapacityRemain"), 0D);
-                if (remain <= 0D) {
-                    continue;
-                }
-
-                String cycleEndTime = stringValue(pkg.get("cycleEndTime"));
-                LocalDateTime parsedEnd = parseCycleEndTime(cycleEndTime);
-                if (parsedEnd == null) {
-                    continue;
-                }
-
-                out.add(new ExpiringPackageCandidate(
-                        acc.id(),
-                        acc.uid(),
-                        stringValue(pkg.get("packageCode")),
-                        parsedEnd,
-                        remain));
+                out.add(pkg);
             }
             return out;
         } catch (Exception e) {
@@ -394,6 +542,30 @@ public class SettingsService {
                     acc.id(), acc.uid(), e.getMessage());
             return List.of();
         }
+    }
+
+    private List<ExpiringPackageCandidate> readPositiveCreditPackages(WorkbuddyAccountRecord acc) {
+        List<ExpiringPackageCandidate> out = new ArrayList<>();
+        for (Map<String, Object> pkg : readCreditPackageMaps(acc)) {
+            double remain = asDouble(pkg.get("cycleCapacityRemain"), 0D);
+            if (remain <= 0D) {
+                continue;
+            }
+
+            String cycleEndTime = stringValue(pkg.get("cycleEndTime"));
+            LocalDateTime parsedEnd = parseCycleEndTime(cycleEndTime);
+            if (parsedEnd == null) {
+                continue;
+            }
+
+            out.add(new ExpiringPackageCandidate(
+                    acc.id(),
+                    acc.uid(),
+                    stringValue(pkg.get("packageCode")),
+                    parsedEnd,
+                    remain));
+        }
+        return out;
     }
 
     private LocalDateTime parseCycleEndTime(String raw) {
@@ -419,6 +591,23 @@ public class SettingsService {
 
     private static String stringValue(Object value) {
         return value == null ? "" : String.valueOf(value).trim();
+    }
+
+    private Comparator<ExpiringPackageCandidate> comparatorFor(PackagePickMode mode) {
+        return switch (mode) {
+            case EXPIRING -> Comparator
+                    .comparing(ExpiringPackageCandidate::cycleEndTime)
+                    .thenComparing(ExpiringPackageCandidate::accountId)
+                    .thenComparing(c -> c.packageCode() == null ? "" : c.packageCode());
+            // least/most 候选粒度是"账号",packageCode 与 cycleEndTime 必为 null,
+            // 不参与排序 —— 仅以总余量 + accountId 做 tie-breaker
+            case LEAST -> Comparator
+                    .comparing(ExpiringPackageCandidate::cycleCapacityRemain)
+                    .thenComparing(ExpiringPackageCandidate::accountId);
+            case MOST -> Comparator
+                    .comparing(ExpiringPackageCandidate::cycleCapacityRemain, Comparator.reverseOrder())
+                    .thenComparing(ExpiringPackageCandidate::accountId);
+        };
     }
 
     private static double asDouble(Object value, double fallback) {

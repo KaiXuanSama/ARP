@@ -29,9 +29,9 @@ type ConsumptionMode = typeof MODE[keyof typeof MODE]
 
 const modeOptions: SelectOption[] = [
   { value: MODE.DESIGNATED, label: '指定模式' },
-  { value: MODE.LEAST,      label: '量少优先' },
   { value: MODE.EXPIRING,   label: '临期优先' },
-  { value: MODE.MOST,       label: '量多优先' },
+  { value: MODE.LEAST,      label: '量少优先' },
+  { value: MODE.MOST,       label: '量大优先' },
 ]
 
 const consumptionMode = ref<ConsumptionMode>(MODE.DESIGNATED)
@@ -172,11 +172,15 @@ function renderAccountLabel(option: SelectOption | SelectGroupOption): VNode {
  * 在 "指定模式" 一样的 `昵称(余量/总量)` 基础上,后面追加"选中原因",让用户看到
  * 为什么后端会选这个账号:
  * <ul>
- *   <li>临期优先 → 追加 `· 包名 · 到期时间`</li>
- *   <li>其他模式暂未实现,不会走到这里</li>
+ *   <li>临期优先 → 追加 `· 到期时间`</li>
+ *   <li>量少优先 / 量大优先 → 不追加额外原因文案,仅显示账号与当前积分余量</li>
  * </ul>
  * <p>
- * 渲染示例: "凯旋Sama（3200.0 / 3200）· base_7d · 2026-07-10 23:59:59"
+ * 渲染示例:
+ * <ul>
+ *   <li>临期优先: "凯旋Sama（3200.0 / 3200） · 2026-07-10 23:59:59"</li>
+ *   <li>量少优先: "凯旋Sama（3200.0 / 3200）"</li>
+ * </ul>
  */
 function renderPreviewLabel(option: SelectOption | SelectGroupOption): VNode {
   const opt = option as AccountOption
@@ -185,9 +189,10 @@ function renderPreviewLabel(option: SelectOption | SelectGroupOption): VNode {
     ? `${remain.toFixed(1)} / ${size.toFixed(0)}`
     : '-'
   const base = `${opt.nickname || opt.uid}（${creditText}）`
-  // 预览模式只追加到期时间,不显示 packageCode —— "TCACA_code_007_nzdH5h4Nl0" 这类内部 code 对用户无意义
+  // 预览模式:临期优先追加到期时间;量少/量大优先不追加额外文案。
+  // packageCode 不显示 —— "TCACA_code_007_nzdH5h4Nl0" 这类内部 code 对用户无意义
   const p = previewAccount.value
-  const reason = p?.cycleEndTime ? ` · ${p.cycleEndTime}` : ''
+  const reason = p?.mode === MODE.EXPIRING && p.cycleEndTime ? ` · ${p.cycleEndTime}` : ''
   return h('div', { class: 'account-option account-option-preview' }, `${base}${reason}`)
 }
 
