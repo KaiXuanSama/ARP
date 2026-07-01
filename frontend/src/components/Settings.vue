@@ -39,9 +39,26 @@ const consumptionMode = ref<ConsumptionMode>(MODE.DESIGNATED)
 /**
  * 当前 mode 是否需要展示"指定账号"下拉框
  * <p>
- * 命名对应后端预留语义:designated 表示人工指定,其余三种由后端自动选号
+ * designated —— 编辑型下拉,用户可选<br>
+ * 非 designated —— 只读型预览,展示后端在当前 mode 下会选哪个账号
  */
 const showAccountPicker = computed(() => consumptionMode.value === MODE.DESIGNATED)
+const showPreviewAccount = computed(() => consumptionMode.value !== MODE.DESIGNATED)
+
+/** 后端 preview 接口返回的"非指定模式"下当前会命中的账号信息 */
+interface PreviewChatAccount {
+  accountId: number
+  uid: string
+  mode: string
+  packageCode: string | null
+  cycleEndTime: string | null
+  cycleCapacityRemain: number | null
+}
+
+/** 非指定模式下的预览账号(只用于显示,不参与表单提交) */
+const previewAccount = ref<PreviewChatAccount | null>(null)
+const previewError = ref<string | null>(null)
+const loadingPreview = ref(false)
 
 // ===== 账号列表（走 store，缓存空时 store 内部会阻塞拉服务端一次） =====
 
@@ -79,6 +96,29 @@ const accountOptions = computed<AccountOption[]>(() =>
       credit: v.credit,
     })),
 )
+
+/**
+ * 预览模式下"指定账号"下拉框的可选项
+ * <p>
+ * 只有一项:后端在当前 mode 下选中的账号(若有);无时是空数组 → 下拉显示 placeholder
+ * <p>
+ * label 拼上 uid 用于"如果 store 里没缓存该账号昵称"时的兜底显示
+ */
+const previewOptions = computed<AccountOption[]>(() => {
+  const p = previewAccount.value
+  if (!p) return []
+  // 尽量从 store 拿昵称,让用户看到熟悉的显示;拿不到就退到 uid
+  const cached = accountStore.view.find((v) => v.id === p.accountId)
+  const nickname = cached?.nickname && cached.nickname !== '未定义' ? cached.nickname : p.uid
+  return [{
+    value: p.accountId,
+    label: nickname,
+    id: p.accountId,
+    uid: p.uid,
+    nickname,
+    credit: cached?.credit ?? null,
+  }]
+})
 
 /**
  * 触发 store 加载(缓存非空立刻返回;缓存空阻塞拉一次服务端)
@@ -127,6 +167,31 @@ function renderAccountLabel(option: SelectOption | SelectGroupOption): VNode {
 }
 
 /**
+ * 预览模式下的下拉项 label 渲染
+ * <p>
+ * 在 "指定模式" 一样的 `昵称(余量/总量)` 基础上,后面追加"选中原因",让用户看到
+ * 为什么后端会选这个账号:
+ * <ul>
+ *   <li>临期优先 → 追加 `· 包名 · 到期时间`</li>
+ *   <li>其他模式暂未实现,不会走到这里</li>
+ * </ul>
+ * <p>
+ * 渲染示例: "凯旋Sama（3200.0 / 3200）· base_7d · 2026-07-10 23:59:59"
+ */
+function renderPreviewLabel(option: SelectOption | SelectGroupOption): VNode {
+  const opt = option as AccountOption
+  const { remain, size } = summarizeCredit(opt.credit)
+  const creditText = opt.credit
+    ? `${remain.toFixed(1)} / ${size.toFixed(0)}`
+    : '-'
+  const base = `${opt.nickname || opt.uid}（${creditText}）`
+  // 预览模式只追加到期时间,不显示 packageCode —— "TCACA_code_007_nzdH5h4Nl0" 这类内部 code 对用户无意义
+  const p = previewAccount.value
+  const reason = p?.cycleEndTime ? ` · ${p.cycleEndTime}` : ''
+  return h('div', { class: 'account-option account-option-preview' }, `${base}${reason}`)
+}
+
+/**
  * 把 CreditSnapshot 折叠成"已用/总量"两个数
  * <p>
  * 算法与 AccountManagement.vue 表格"积分剩余"列完全一致:
@@ -142,6 +207,46 @@ function summarizeCredit(snap: CreditSnapshot | null | undefined): { remain: num
     size += p.cycleCapacitySize || 0
   }
   return { remain, size }
+}
+
+/**
+ * 拉取"非指定模式"下后端会选中的账号预览
+ * <p>
+ * 走 GET /api/settings/chat.consumption/preview?mode=...
+ * <ul>
+ *   <li>成功 → 写入 previewAccount,清空 previewError</li>
+ *   <li>失败(400 表示 least/most 暂未实现 / 无可用的临期包) → 把后端 message 写入 previewError,清空 previewAccount</li>
+ *   <li>网络异常 → previewError 给"网络异常,请稍后重试"</li>
+ * </ul>
+ * 同一时刻只跑一个请求(in-flight 锁):mode 频繁切换时避免老请求覆盖新结果
+ */
+let previewInFlight = false
+async function fetchPreviewAccount(mode: ConsumptionMode): Promise<void> {
+  if (previewInFlight) return
+  previewInFlight = true
+  loadingPreview.value = true
+  // 切 mode 立刻清空旧值,避免短暂显示上一个 mode 的结果
+  previewAccount.value = null
+  previewError.value = null
+  try {
+    const res = await fetch(`/api/settings/chat.consumption/preview?mode=${encodeURIComponent(mode)}`)
+    if (res.status === 404) {
+      previewError.value = '预览接口不存在,请检查后端版本'
+      return
+    }
+    const body = (await res.json().catch(() => ({}))) as { data?: PreviewChatAccount; message?: string }
+    if (res.ok && body.data) {
+      previewAccount.value = body.data
+    } else {
+      previewError.value = body.message || `请求失败: ${res.status}`
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '网络异常'
+    previewError.value = `网络异常: ${msg}`
+  } finally {
+    loadingPreview.value = false
+    previewInFlight = false
+  }
 }
 
 // ===== 持久化:从后端拉初始值 + Save 按钮 =====
@@ -236,10 +341,18 @@ async function saveSettings(): Promise<void> {
  * 防止后端清空 accountId 后,前端还残留着旧的 selectedAccountId,造成"看着选了但其实没生效"
  * <p>
  * 模式切到非指定时立即同步清空;模式切到指定时如果还没选过则不动
+ * <p>
+ * 同时在切到非指定模式时触发一次"指定账号预览"拉取,显示"当前 mode 后端会选哪个账号"
  */
 watch(consumptionMode, (m) => {
-  if (m !== MODE.DESIGNATED) {
+  if (m === MODE.DESIGNATED) {
+    // 切回指定模式:清掉预览状态(避免误显示);selectedAccountId 保留用户上次的编辑选择
+    previewAccount.value = null
+    previewError.value = null
+  } else {
+    // 切到非指定模式:清空编辑型 selectedAccountId,并触发预览
     selectedAccountId.value = null
+    void fetchPreviewAccount(m)
   }
 })
 
@@ -249,6 +362,10 @@ onMounted(async () => {
  // "先渲染默认值 → 再被后端值覆盖"的闪烁/错位。
  await loadAccounts()
  await loadSettings()
+ // 如果后端持久化的是非指定模式,再补一次预览拉取(此时 consumptionMode 已经被 loadSettings 同步过)
+ if (consumptionMode.value !== MODE.DESIGNATED) {
+  await fetchPreviewAccount(consumptionMode.value)
+ }
 })
 </script>
 
@@ -295,11 +412,27 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div v-else class="form-row form-row-hint">
-          <div class="form-label"></div>
-          <div class="form-control form-control-hint">
-            <Icon name="settings" :size="14" />
-            <span>当前模式由后端自动选择账号,无需手动指定。</span>
+        <div v-else-if="showPreviewAccount" class="form-row">
+          <label class="form-label" for="designated-account">指定账号</label>
+          <div class="form-control">
+            <n-spin :show="loadingPreview" size="small">
+              <n-select
+                id="designated-account"
+                class="account-option-preview-host"
+                :value="previewAccount?.accountId ?? null"
+                :options="previewOptions"
+                :render-label="renderPreviewLabel"
+                placeholder="后端暂未选中任何账号"
+                :disabled="true"
+              />
+            </n-spin>
+            <p v-if="previewError" class="form-hint">
+              <Icon name="settings" :size="12" />
+              <span>{{ previewError }}</span>
+            </p>
+            <p v-else-if="!loadingPreview && !previewAccount" class="form-hint">
+              切换到指定模式可手动选择账号。
+            </p>
           </div>
         </div>
       </div>
@@ -439,5 +572,19 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ========== 预览模式下的"指定账号"项:不可点击,文本置灰 ==========
+   复用了 .form-hint / .footer-hint 的同款次要文本色 #8c8c8c,
+   让用户在视觉上明确这条下拉是只读预览、不能编辑 */
+:deep(.account-option-preview) {
+  color: #8c8c8c;
+}
+
+/* 让 disabled 状态下 Naive UI 的 select 自身文字色也走同款灰,
+   否则默认 disabled 是 var(--n-text-color-disabled)(#999 一类),与 label 不一致 */
+:deep(.n-select.account-option-preview-host .n-base-selection-input),
+:deep(.n-select.account-option-preview-host .n-base-selection-placeholder) {
+  color: #8c8c8c;
 }
 </style>

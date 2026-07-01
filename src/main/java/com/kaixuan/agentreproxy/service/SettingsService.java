@@ -3,6 +3,7 @@ package com.kaixuan.agentreproxy.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaixuan.agentreproxy.dto.AppSettingResponse;
+import com.kaixuan.agentreproxy.dto.ChatAccountPreview;
 import com.kaixuan.agentreproxy.dto.ConsumptionSettingValue;
 import com.kaixuan.agentreproxy.dto.UpdateConsumptionSettingRequest;
 import com.kaixuan.agentreproxy.entity.AppSettingRecord;
@@ -155,6 +156,74 @@ public class SettingsService {
      * 若所有账号都没有可用的流量包快照，返回400，引导用户先刷新积分。
      */
     public Long resolveExpiringPriorityChatAccountId() {
+        return selectExpiringPackage()
+                .map(picked -> {
+                    // 打印选中的账号信息,便于排查"为什么这次请求走了这个账号"
+                    log.info(
+                            "[chat.consumption=expiring] 选中账号 accountId={}, uid={}, packageCode={}, cycleEndTime={}, remain={}",
+                            picked.accountId(), picked.uid(), picked.packageCode(),
+                            picked.cycleEndTime(), picked.cycleCapacityRemain());
+                    return picked.accountId();
+                })
+                .orElseThrow(() -> {
+                    log.warn("[chat.consumption=expiring] 没有可用的临期流量包账号:扫描了 0 个候选");
+                    return new IllegalArgumentException(
+                            "当前没有可用的临期流量包账号，请先刷新积分数据并确认账号仍有余量");
+                });
+    }
+
+    /**
+     * 预览模式:在不真正修改 {@code chat.consumption} 设置的情况下,
+     * 返回"如果按当前 mode 路由,后端会选哪个账号"等诊断信息.
+     * <p>
+     * 当前实现:
+     * <ul>
+     *   <li>{@code expiring} —— 返回最先过期且余量&gt;0 的包所属账号</li>
+     *   <li>{@code least} / {@code most} —— 暂未实现,抛 400</li>
+     *   <li>{@code designated} —— 没有"预览"语义(直接读设置里的 accountId),抛 400</li>
+     * </ul>
+     * 该方法内部跑 JDBC + extra JSON 解析,调用方需要在 boundedElastic 线程池里调
+     */
+    public ChatAccountPreview previewChatAccountId(String mode) {
+        String normalized = mode == null ? "" : mode.trim();
+        return switch (normalized) {
+            case "expiring" -> {
+                ExpiringPackageCandidate picked = selectExpiringPackage().orElseThrow(() -> {
+                    log.warn("[preview chat.consumption=expiring] 没有可用的临期流量包账号");
+                    return new IllegalArgumentException(
+                            "当前没有可用的临期流量包账号，请先刷新积分数据并确认账号仍有余量");
+                });
+                log.info(
+                        "[preview chat.consumption=expiring] 选中账号 accountId={}, uid={}, packageCode={}, cycleEndTime={}, remain={}",
+                        picked.accountId(), picked.uid(), picked.packageCode(),
+                        picked.cycleEndTime(), picked.cycleCapacityRemain());
+                yield new ChatAccountPreview(
+                        picked.accountId(),
+                        picked.uid(),
+                        "expiring",
+                        picked.packageCode(),
+                        picked.cycleEndTime(),
+                        picked.cycleCapacityRemain());
+            }
+            case "least", "most" ->
+                throw new IllegalArgumentException(
+                        "当前仅支持“临期优先”的预览,其余消耗方式暂未实现: " + normalized);
+            case "designated" ->
+                throw new IllegalArgumentException(
+                        "“指定模式”没有预览语义,请直接读取 GET /api/settings/chat.consumption");
+            default ->
+                throw new IllegalArgumentException("未知的消耗方式: " + normalized);
+        };
+    }
+
+    /**
+     * 内部:从所有账号的 credit.packages 中选出"最先到期且余量&gt;0"的包.
+     * <p>
+     * 不抛异常 —— 找不到时返回空 Optional,由调用方决定如何提示.
+     * 这是给 {@link #resolveExpiringPriorityChatAccountId()} 和
+     * {@link #previewChatAccountId(String)} 共用的核心选择器.
+     */
+    private java.util.Optional<ExpiringPackageCandidate> selectExpiringPackage() {
         List<ExpiringPackageCandidate> candidates = new ArrayList<>();
         for (WorkbuddyAccountRecord acc : accountRepository.findAll()) {
             if (acc.id() == null || !hasUsableCredential(acc)) {
@@ -168,22 +237,7 @@ public class SettingsService {
                 .thenComparing(ExpiringPackageCandidate::accountId)
                 .thenComparing(c -> c.packageCode() == null ? "" : c.packageCode()));
 
-        return candidates.stream()
-                .findFirst()
-                .map(picked -> {
-                    // 打印选中的账号信息,便于排查"为什么这次请求走了这个账号"
-                    log.info(
-                            "[chat.consumption=expiring] 选中账号 accountId={}, uid={}, packageCode={}, cycleEndTime={}, remain={}",
-                            picked.accountId(), picked.uid(), picked.packageCode(),
-                            picked.cycleEndTime(), picked.cycleCapacityRemain());
-                    return picked.accountId();
-                })
-                .orElseThrow(() -> {
-                    log.warn("[chat.consumption=expiring] 没有可用的临期流量包账号:扫描了 {} 个候选",
-                            candidates.size());
-                    return new IllegalArgumentException(
-                            "当前没有可用的临期流量包账号，请先刷新积分数据并确认账号仍有余量");
-                });
+        return candidates.stream().findFirst();
     }
 
     // ============== 写(只暴露 chat.consumption 这一个 key,避免泛 key 写入带来的校验扩散)

@@ -10,7 +10,10 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 import java.util.Map;
@@ -63,5 +66,31 @@ public class SettingsController {
     @PutMapping("/chat.consumption")
      public ConsumptionSettingValue updateConsumption(@RequestBody UpdateConsumptionSettingRequest req) {
         return settingsService.updateConsumption(req);
+    }
+
+    /**
+     * 预览接口:在不改 {@code chat.consumption} 设置的前提下,告诉前端"如果按 mode 路由会选哪个账号".
+     * <p>
+     * <strong>query 参数</strong>:
+     * <ul>
+     *   <li>{@code mode} —— 可选,默认 {@code expiring};允许值 {@code expiring} / {@code least} / {@code most}</li>
+     * </ul>
+     * <strong>响应</strong>:跟现有接口一致包成 {@code {data: ChatAccountPreview}} 结构,便于前端直接对齐.
+     * <p>
+     * <strong>阻塞说明</strong>:内部走 JDBC + JSON 解析,必须跑在 boundedElastic 线程池上,
+     * 避免在 reactor 事件循环上 .block()
+     * <p>
+     * <strong>错误</strong>:
+     * <ul>
+     *   <li>{@code mode=designated} —— 400,"指定模式没有预览语义"</li>
+     *   <li>{@code mode=least} / {@code mode=most} —— 400,"暂未实现"</li>
+     *   <li>没有任何可用账号/包 —— 400,"请先刷新积分数据"</li>
+     * </ul>
+     */
+    @GetMapping("/chat.consumption/preview")
+    public Mono<Map<String, Object>> previewChatAccount(@RequestParam(name = "mode", required = false) String mode) {
+        return Mono.fromCallable(() -> settingsService.previewChatAccountId(mode))
+                .subscribeOn(Schedulers.boundedElastic())
+                .map(preview -> Map.<String, Object>of("data", preview));
     }
 }
