@@ -80,9 +80,6 @@ interface CheckinStreamEvent {
 
 const message = useMessage()
 
-const showCredentialModal = ref(false)
-const credentialRow = ref<AccountRow | null>(null)
-
 const showChooser = ref(false)
 
 const showDetail = ref(false)
@@ -173,9 +170,53 @@ async function forceCheckin() {
 
 const accountStore = useAccountData()
 
-function openCredentialDetail(row: AccountRow) {
- credentialRow.value = row
- showCredentialModal.value = true
+/**
+ * 点击"凭证"列 → 复制主凭证的完整原文到剪贴板
+ * <p>
+ * "主凭证" 跟表格里显示的缩写完全对齐：有 APIKey 就复制 APIKey，否则复制 AccessToken。
+ * <ul>
+ *   <li>主凭证缺失（apiKey / accessToken 都为空）→ 弹错误，不复制</li>
+ *   <li>剪贴板 API 不可用（HTTP 非 secure context / 旧浏览器）→ 走 {@code document.execCommand('copy')} 兜底</li>
+ *   <li>都失败 → 弹错误，提示用户手动复制（避免静默失败）</li>
+ * </ul>
+ */
+async function copyPrimaryCredential(row: AccountRow): Promise<void> {
+  const nickname = row.nickname && row.nickname !== '未定义' ? row.nickname : row.uid || '该账号'
+  const apiKey = row.apiKey?.trim()
+  const accessToken = row.accessToken?.trim()
+  let plaintext = ''
+  let label = ''
+  if (apiKey) {
+    plaintext = apiKey
+    label = 'APIKey'
+  } else if (accessToken) {
+    plaintext = accessToken
+    label = 'AccessToken'
+  } else {
+    message.error(`${nickname}：未找到可复制的凭证`)
+    return
+  }
+
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(plaintext)
+    } else {
+      // 兜底：file:// 或 HTTP（非 https）下 navigator.clipboard 不可用
+      const ta = document.createElement('textarea')
+      ta.value = plaintext
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      if (!ok) throw new Error('execCommand copy failed')
+    }
+    message.success(`${nickname}：${label} 已复制`)
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(`复制失败：${msg}，请手动复制`)
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -207,7 +248,7 @@ const columns: DataTableColumns<AccountRow> = [
  quaternary: true,
  size: 'tiny',
  style: { fontFamily: "'SFMono-Regular',Consolas,'Liberation Mono',monospace", fontSize: '12px' },
- onClick: () => openCredentialDetail(row),
+ onClick: () => { void copyPrimaryCredential(row) },
  }, () => row.primaryCredential || '-'),
  },
  {
@@ -667,24 +708,6 @@ onMounted(async () => {
        <n-data-table :columns="columns" :data="filteredTableData" :bordered="false" :single-line="false" size="small"
         :row-key="(row: AccountRow) => row.id" />
     </n-card>
-
-    <!--凭证详情弹窗 -->
-    <n-modal v-model:show="showCredentialModal" preset="card" title="凭证详情" style="width:600px;">
-      <n-descriptions label-placement="left" bordered :column="1" size="small">
-        <n-descriptions-item label="昵称">{{ credentialRow?.nickname || '未定义' }}</n-descriptions-item>
-        <n-descriptions-item label="API Key">
-          <code style="word-break: break-all; font-size:12px;">{{ credentialRow?.apiKey || '-' }}</code>
-        </n-descriptions-item>
-        <n-descriptions-item label="Access Token">
-          <code style="word-break: break-all; font-size:12px;">{{ credentialRow?.accessToken || '-' }}</code>
-        </n-descriptions-item>
-      </n-descriptions>
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showCredentialModal = false">关闭</n-button>
-        </n-space>
-      </template>
-    </n-modal>
 
     <!--三入口选择 -->
     <n-modal v-model:show="showChooser" preset="card" title="添加账户" style="width:520px;">
