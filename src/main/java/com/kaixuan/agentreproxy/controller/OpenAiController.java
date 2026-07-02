@@ -32,11 +32,11 @@ import java.util.Map;
  * 鉴权透传"的轻量包装。
  * <p>
  * <strong>Chat路由（已迁移到 per-key）</strong>：
- * <ul>
  * <li>从请求头 {@code Authorization: Bearer ak-xxxxx}提取下游 API Key</li>
- * <li>按 key 自己的 {@code consumption} 字段（designated / least / most /
- * expiring）选号</li>
- * <li>全局 {@code app_settings.chat.consumption} 设置已废弃，不再被 chat路由消费</li>
+ * <li>按 key 自己的 {@code consumption} 字段(designated / least / most /
+ * expiring)选号</li>
+ * <li>全局 {@code app_settings.chat.consumption} 端点已删除(2026-07),
+ *     chat 路由自此不再有任何"全局设置"概念;选号全部由 per-key consumption 决定</li>
  * <li>key 不存在 /禁用 / 过期 →401 Unauthorized</li>
  * <li>只暴露 OpenAI协议的一小部分（chat/completions + models）；embedding / completions /
  * files等暂未实现</li>

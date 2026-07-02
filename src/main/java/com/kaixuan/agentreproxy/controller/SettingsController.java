@@ -1,20 +1,13 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.dto.AppSettingResponse;
-import com.kaixuan.agentreproxy.dto.ConsumptionSettingValue;
-import com.kaixuan.agentreproxy.dto.UpdateConsumptionSettingRequest;
 import com.kaixuan.agentreproxy.service.SettingsService;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 import java.util.Map;
@@ -22,13 +15,16 @@ import java.util.Map;
 /**
  * 应用设置 REST 端点
  * <p>
- * 当前支持的 key:
- * <ul>
- *   <li>chat.consumption —— 对话模式消耗方式,详见 {@code ConsumptionSettingValue}</li>
- * </ul>
+ * <strong>已删除</strong>:所有 {@code /api/settings/chat.consumption*} 专用端点 —— 全局
+ * {@code app_settings.chat.consumption} 设置已被下游 API Key 的 per-key {@code consumption}
+ * 字段取代,chat 路由不再消费全局设置。SettingsService 同步删除了 {@code updateConsumption} /
+ * {@code getConsumptionValue} / {@code KEY_CHAT_CONSUMPTION} 等。
  * <p>
- * 通用规则:GET 返回全部;PUT 单项覆写(目前只暴露 chat.consumption 这一个 key,后续加新 key 时
- * 在 SettingsService 加方法 + 在控制器加 @PutMapping 即可)
+ * <strong>当前</strong>:通用 CRUD 三个端点 —— GET 全部 / GET 单条 / PUT 单条。
+ * 任意 key 任意 JSON value,通过 {@code app_settings} 表 + JSON 字符串存储。
+ * <p>
+ * <strong>选号预览</strong>已搬到独立 controller {@code /api/preview/chat-account-batch} —— 不再依赖
+ * {@code chat.consumption} 概念。
  */
 @RestController
 @RequestMapping("/api/settings")
@@ -46,80 +42,30 @@ public class SettingsController {
         return Map.of("data", data);
     }
 
-     /**
-     * Settings 页面专用:直接返回 "chat.consumption" 的 value结构
-     * <p>
-     * 响应 shape仅为 {mode, accountId?},不包 {key,value,updatedAt} 外壳,这样前端能直接对齐显示。
-     * 不存在时返回404,由前端按"首次未保存"处理。
-     */
-     @GetMapping("/chat.consumption")
-     public ResponseEntity<ConsumptionSettingValue> getConsumption() {
-     return settingsService.getConsumptionValue()
-     .map(ResponseEntity::ok)
-     .orElseGet(() -> ResponseEntity.notFound().build());
-     }
-
     @GetMapping("/{key}")
     public AppSettingResponse getOne(@PathVariable String key) {
         return settingsService.getOne(key).orElse(null);
     }
 
-    @PutMapping("/chat.consumption")
-     public ConsumptionSettingValue updateConsumption(@RequestBody UpdateConsumptionSettingRequest req) {
-        return settingsService.updateConsumption(req);
-    }
-
     /**
-     * 预览接口:在不改 {@code chat.consumption} 设置的前提下,告诉前端"如果按 mode 路由会选哪个账号".
+     * 通用设置 upsert —— {@code PUT /api/settings/{key}}
      * <p>
-     * <strong>query 参数</strong>:
-     * <ul>
-     *   <li>{@code mode} —— 可选,默认 {@code expiring};允许值 {@code expiring} / {@code least} / {@code most}</li>
-     * </ul>
-     * <strong>响应</strong>:跟现有接口一致包成 {@code {data: ChatAccountPreview}} 结构,便于前端直接对齐.
+     * 用途:非 {@code chat.consumption} 的全局设置(定时签到 / 主题 / 默认分页大小 等)的统一入口。
      * <p>
-     * <strong>阻塞说明</strong>:内部走 JDBC + JSON 解析,必须跑在 boundedElastic 线程池上,
-     * 避免在 reactor 事件循环上 .block()
+     * <strong>请求体</strong>:任意 JSON 对象;value 由 service 序列化为 JSON 字符串入库。
+     * 字段缺失(null)存 JSON {@code "null"} 字符串。
      * <p>
-     * <strong>错误</strong>:
-     * <ul>
-     *   <li>{@code mode=designated} —— 400,"指定模式没有预览语义"</li>
-     *   <li>{@code mode=least} / {@code mode=most} —— 400,"暂未实现"</li>
-     *   <li>没有任何可用账号/包 —— 400,"请先刷新积分数据"</li>
-     * </ul>
+     * <strong>响应</strong>:跟 {@code GET /api/settings} 一致的 {@code {data: ...}} 结构,
+     * 返回更新后的 AppSettingResponse(key, value, updatedAt)。
+     * <p>
+     * <strong>路径冲突</strong>:注意 {@code /{key}} 路径变量会"吃"所有非专用端点;专用端点
+     * ({@code /chat.consumption}, {@code /chat.consumption/preview} 等)优先级更高
+     * —— Spring MVC 按"具体路径优先于通配路径"匹配,不会被本端点拦截。
      */
-    @GetMapping("/chat.consumption/preview")
-    public Mono<Map<String, Object>> previewChatAccount(@RequestParam(name = "mode", required = false) String mode) {
-        return Mono.fromCallable(() -> settingsService.previewChatAccountId(mode))
-                .subscribeOn(Schedulers.boundedElastic())
-                .map(preview -> Map.<String, Object>of("data", preview));
-    }
-
-    /**
-     * 批量预览的请求体 —— 只装一个 modes 数组
-     * <p>
-     * 字段可选(默认空 list)以便支持空 POST
-     */
-    public record PreviewBatchRequest(java.util.List<String> modes) {}
-
-    /**
-     * 批量预览接口:一次查多个 mode
-     * <p>
-     * 前端传入要查的 mode 列表(去重,任意顺序),后端逐个调 previewChatAccountId。
-     * <ul>
-     *   <li>失败的 mode 在响应 Map 中对应 null,前端按需降级</li>
-     *   <li>整个请求不会因为某个 mode 失败而 400</li>
-     *   <li>空 modes 列表 → 返回空 Map</li>
-     * </ul>
-     * <p>
-     * 主要场景:账号管理列表加载后,一次性查出所有非 designated 模式对应的"会命中哪个账号"
-     */
-    @PostMapping("/chat.consumption/preview-batch")
-    public Mono<Map<String, Object>> previewChatAccountBatch(
-            @RequestBody(required = false) PreviewBatchRequest req) {
-        java.util.List<String> modes = req == null ? java.util.List.of() : req.modes();
-        return Mono.fromCallable(() -> settingsService.previewChatAccountIdBatch(modes))
-                .subscribeOn(Schedulers.boundedElastic())
-                .map(result -> Map.<String, Object>of("data", result));
+    @PutMapping("/{key}")
+    public Map<String, Object> updateOne(@PathVariable String key, @RequestBody(required = false) Object body) {
+        settingsService.updateByKey(key, body);
+        // 回包用最新 row,保证 updatedAt 反映本次写入
+        return Map.of("data", settingsService.getOne(key).orElse(null));
     }
 }

@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * 签到服务专用的线程池配置
  * <p>
- * 固定 5 个线程,与 {@code chat.consumption} 的"量大/量少优先"无关,
+ * 固定 5 个线程,与下游 API Key 的"量大/量少/临期"选号策略无关,
  * 仅服务于 {@code CheckinService.executeBatch} / {@code executeStream}:
  * 账号多时多账号签到并发执行,降低整体耗时。
  * <p>

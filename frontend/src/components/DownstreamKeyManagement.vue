@@ -138,7 +138,7 @@ const togglingEnabledIds = ref<Set<number>>(new Set())
  * <p>
  * key = mode(least / most / expiring),value = 命中的账号信息(uid + nickname)
  * <p>
- * 数据来源:列表加载后调一次 {@code POST /api/settings/chat.consumption/preview-batch}
+ * 数据来源:列表加载后调一次 {@code POST /api/preview/chat-account-batch}
  * 把列表里出现的所有非 designated mode 一次性查一遍
  * <p>
  * 用 Map 而不是 Set 是因为前端要按 mode 查表,渲染"指定账号"列时直接 hit
@@ -240,7 +240,7 @@ async function refreshPreviewByMode(): Promise<void> {
     return
   }
   try {
-    const res = await fetch('/api/settings/chat.consumption/preview-batch', {
+    const res = await fetch('/api/preview/chat-account-batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ modes: Array.from(modesInTable) }),
