@@ -443,6 +443,13 @@ public class CheckinService {
             String msg = String.valueOf(body.getOrDefault("msg", ""));
             if (code == 0) {
                 String extra = serializeData(body.get("data"));
+                // code=0 成功：覆写当日同类型的所有旧记录（含 10001 占位），保证"每个账号每天只一条成功记录"
+                long[] range = todayRangeMs();
+                int deleted = checkinLogRepository.deleteByAccountIdInDateRange(
+                        acc.id(), CHECKIN_TYPE_DAILY, range[0], range[1]);
+                if (deleted > 0) {
+                    log.info("签到成功 code=0,覆写当日旧记录 account_id={} 删除{}条", acc.id(), deleted);
+                }
                 checkinLogRepository.insert(acc.id(), CHECKIN_TYPE_DAILY, now, extra);
                 return new CheckinExecutionResult(
                         new CheckinResultItem(acc.id(), acc.uid(), nickname, "checked_in", msg),
@@ -453,10 +460,21 @@ public class CheckinService {
                 long[] range = todayRangeMs();
                 List<CheckinLogRecord> existed = checkinLogRepository.findByAccountIdInDateRange(
                         acc.id(), CHECKIN_TYPE_DAILY, range[0], range[1]);
-                Long checkinTime = now;
-                if (existed.isEmpty()) {
+                // 如果当日已有"成功"记录（extra 不含 upstream-10001），不再写占位 —— 成功优先
+                CheckinLogRecord successRecord = existed.stream()
+                        .filter(r -> !isUpstreamAlreadyMarker(r.extra()))
+                        .findFirst()
+                        .orElse(null);
+                Long checkinTime;
+                if (successRecord != null) {
+                    // 已有成功记录，本次 10001 不再落库
+                    checkinTime = successRecord.checkinTime();
+                } else if (existed.isEmpty()) {
+                    // 当日完全没记录：补一条占位
                     checkinLogRepository.insert(acc.id(), CHECKIN_TYPE_DAILY, now, "{\"source\":\"upstream-10001\"}");
+                    checkinTime = now;
                 } else {
+                    // 只有 10001 占位（理论上不会出现多条），复用最早一条
                     checkinTime = existed.get(0).checkinTime();
                 }
                 return new CheckinExecutionResult(
@@ -536,4 +554,68 @@ public class CheckinService {
         }
         return "未定义";
     }
+
+    /**
+     * 判断 extra 是否是上游 10001 占位标记
+     * <p>
+     * 落库时 code=10001 写 {"source":"upstream-10001"}，code=0 写上游 data 完整对象（不包含此字段）。
+     * 用 extra 是否含此字段区分两种签到状态。
+     */
+    private static boolean isUpstreamAlreadyMarker(String extra) {
+        if (extra == null || extra.isBlank()) {
+            return false;
+        }
+        return extra.contains("\"source\":\"upstream-10001\"");
+    }
+
+ // ==============历史签到日志分页查询 ==============
+
+ /**
+ * 分页查询指定账号的签到历史日志
+ * <p>
+ * 基于 offset 分页（支持跳页）。排序字段经白名单校验防 SQL 注入。
+ * extra 字段反序列化为 Object（通常是 Map）便于前端消费；解析失败返回原始字符串。
+ *
+ * @param req查询请求（accountId必填）
+ * @return 分页结果，list 元素为 {@link com.kaixuan.agentreproxy.dto.CheckinLogItem}
+ */
+ public com.kaixuan.agentreproxy.dto.PageResult<com.kaixuan.agentreproxy.dto.CheckinLogItem> queryHistoryPage(
+ com.kaixuan.agentreproxy.dto.CheckinLogQueryRequest req) {
+ if (req == null || req.accountId() == null) {
+ throw new IllegalArgumentException("accountId 不能为空");
+ }
+ long accountId = req.accountId();
+ String type = req.safeCheckinType();
+ int pageNum = req.safePageNum();
+ int pageSize = req.safePageSize();
+ String orderBy = req.safeOrderBy();
+ boolean asc = req.safeAsc();
+ int offset = (pageNum -1) * pageSize;
+
+ long total = checkinLogRepository.countByAccountIdAndType(accountId, type);
+ java.util.List<com.kaixuan.agentreproxy.entity.CheckinLogRecord> records =
+ checkinLogRepository.findPageByAccountIdAndType(accountId, type, orderBy, asc, offset, pageSize);
+
+ java.util.List<com.kaixuan.agentreproxy.dto.CheckinLogItem> items = records.stream()
+ .map(this::toCheckinLogItem)
+ .toList();
+ return com.kaixuan.agentreproxy.dto.PageResult.of(total, items, pageNum, pageSize);
+ }
+
+ /**
+ * 把 CheckinLogRecord转成 CheckinLogItem，extra 反序列化为 Object
+ */
+ private com.kaixuan.agentreproxy.dto.CheckinLogItem toCheckinLogItem(
+ com.kaixuan.agentreproxy.entity.CheckinLogRecord rec) {
+ Object extraObj = null;
+ if (rec.extra() != null && !rec.extra().isBlank()) {
+ try {
+ extraObj = objectMapper.readValue(rec.extra(), Object.class);
+ } catch (Exception ignored) {
+ extraObj = rec.extra(); // 解析失败回退为原始字符串
+ }
+ }
+ return new com.kaixuan.agentreproxy.dto.CheckinLogItem(
+ rec.id(), rec.accountId(), rec.checkinType(), rec.checkinTime(), extraObj);
+ }
 }
