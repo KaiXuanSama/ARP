@@ -6,6 +6,8 @@ import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -46,6 +48,8 @@ public class OpenAiController {
 
     /** OpenAI风格 list响应里的硬编码时间戳锚点（秒）。固定值避免每次响应 created变化导致客户端误判模型列表更新 */
     private static final long MODELS_CREATED_AT = 1700000000L; // 2023-11-14T22:13:20Z
+
+    private static final Logger log = LoggerFactory.getLogger(OpenAiController.class);
 
     private final UpstreamClient upstream;
     private final ModelsConfigService modelsConfig;
@@ -98,8 +102,78 @@ public class OpenAiController {
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
                     usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
-                    return upstream.postChatStreamForAccount(ctx.accountId(), body);
+                    return upstream.postChatStreamForAccount(ctx.accountId(), body)
+                            // 侧路拦截:每条 SSE 文本 element 都检查一次
+                            // CodeBuddy 的"结算 chunk"在 [DONE] 之前带 usage 字段
+                            // 透传原 element 给客户端,只做 side-effect 解析 + 落库
+                            .doOnNext(element -> interceptChatChunk(element, ctx.keyId()));
                 });
+    }
+
+    /**
+     * 拦截流式响应的每个 chunk,识别"含 usage 字段的最终结算 chunk"并落库
+     * <p>
+     * 实际收到的 element 形态(已通过 log.json 确认 CodeBuddy 是 <b>NDJSON</b>,
+     * 不是 OpenAI 标准 SSE):
+     * <ul>
+     *   <li>{@code {"id":"...","choices":[...],"usage":null}} —— 中间 content chunk(无 credit)</li>
+     *   <li>{@code {"id":"...","choices":[],"usage":{"credit":1.23,...}}} —— 结算 chunk(关键)</li>
+     *   <li>{@code [DONE]} —— 流结束标记</li>
+     * </ul>
+     * <p>
+     * 旧实现(<b>已废</b>)按 OpenAI SSE 协议解析,只认 {@code data: ...} 前缀;
+     * 实际是 NDJSON 时 {@code startsWith("data:")} 永不命中,导致 {@code recordChatUsage}
+     * 永远不被调用 —— 这就是"积分不累加、日志不落库"的根因。
+     * <p>
+     * <strong>新实现</strong>:
+     * <ol>
+     *   <li>每行 trim 后,若以 {@code data:} 开头(兼容 OpenAI SSE)→ 剥前缀</li>
+     *   <li>否则直接当裸 JSON 处理(兼容 CodeBuddy NDJSON)</li>
+     *   <li>内容是 {@code [DONE]} / 空 / 非 JSON → 跳过</li>
+     *   <li>含 {@code "usage"} 字段 → 调 {@code recordChatUsage}</li>
+     * </ol>
+     *
+     * @param element 一条 SSE/NDJSON 文本(可能含多个 chunk + 末行 [DONE])
+     * @param keyId   下游 key 主键
+     */
+    private void interceptChatChunk(String element, Long keyId) {
+        if (element == null || element.isBlank()) {
+            return;
+        }
+        // 临时诊断日志:记前 80 字符 + 总长度,帮定位"上游到底是 SSE 还是 NDJSON"
+        // 限制:每个 element 第一次都打(量级 ~chat 完成时打几次,不是洪水)
+        log.info("interceptChatChunk enter, keyId={}, len={}, head={}",
+                keyId, element.length(),
+                element.length() > 80 ? element.substring(0, 80) + "..." : element);
+        try {
+            // 按 \n 切 —— SSE 和 NDJSON 都用 \n 分隔 chunk
+            for (String line : element.split("\n")) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) continue;
+                String json;
+                if (trimmed.startsWith("data:")) {
+                    // OpenAI SSE: data: {...}
+                    json = trimmed.substring("data:".length()).trim();
+                } else if (trimmed.startsWith("{")) {
+                    // NDJSON: {...} 裸 JSON,直接用
+                    json = trimmed;
+                } else {
+                    // event: / id: / retry: / [DONE] 等其它 SSE 字段 → 跳过
+                    if (!"[DONE]".equals(trimmed)) {
+                        log.debug("interceptChatChunk skip non-data line: {}", trimmed);
+                    }
+                    continue;
+                }
+                if (json.isEmpty() || "[DONE]".equals(json)) continue;
+                // 快速嗅探:有 "usage" 字段才走完整解析(避免每个 chunk 都做 JSON parse)
+                if (json.contains("\"usage\"")) {
+                    downstreamApiKeyService.recordChatUsage(keyId, json);
+                }
+            }
+        } catch (Exception e) {
+            // 任何异常不外抛 —— 这是 side-channel,失败仅记日志
+            log.warn("interceptChatChunk 异常 keyId={}: {}", keyId, e.getMessage());
+        }
     }
 
     // ============== Models ==============

@@ -113,6 +113,48 @@ public class DownstreamApiKeyJdbcRepository {
                 id);
     }
 
+    /**
+     * 原子累加 used_credits —— 上游 chat 响应最终 chunk 解出 {@code usage.credit} 后调用
+     * <p>
+     * SQL 用 {@code SET used_credits = used_credits + ?} 直接累加,避免 read-modify-write 竞态。
+     * 顺带刷新 {@code updated_at}。
+     * <p>
+     * <strong>不强制 credit_limit</strong> —— 即使超额也只累加,限额禁用由调用方(本期内
+     * 不会,保留字段供后续业务接计费时使用)。
+     *
+     * @param id    downstream_api_key 主键
+     * @param delta 累加值(从 {@code usage.credit} 解析;>=0,可能含小数)
+     * @return 受影响行数
+     */
+    public int incrementUsedCredits(Long id, double delta) {
+        if (id == null) return 0;
+        return jdbcTemplate.update(
+                "UPDATE downstream_api_key SET used_credits = used_credits + ?, " +
+                        "updated_at = (strftime('%s', 'now') * 1000) WHERE id = ?",
+                delta, id);
+    }
+
+    /**
+     * 写入调用日志 —— 落库 {@code downstream_api_key_call_log} 表
+     * <p>
+     * 三列结构:id / content(完整 chunk JSON 字符串)/ created_at
+     * <p>
+     * 返回新行 id(本期内不消费,但保留供后续"日志详情页"用)
+     */
+    public long insertCallLog(String content) {
+        org.springframework.jdbc.support.GeneratedKeyHolder keyHolder =
+                new org.springframework.jdbc.support.GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            var ps = connection.prepareStatement(
+                    "INSERT INTO downstream_api_key_call_log (content) VALUES (?)",
+                    new String[]{"id"});
+            ps.setString(1, content);
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        return key == null ? -1L : key.longValue();
+    }
+
     /** 总数(分页用) */
     public long count() {
         Long cnt = jdbcTemplate.queryForObject(

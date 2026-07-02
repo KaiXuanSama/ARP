@@ -1,5 +1,7 @@
 package com.kaixuan.agentreproxy.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaixuan.agentreproxy.dto.DownstreamApiKeyItem;
 import com.kaixuan.agentreproxy.dto.DownstreamApiKeyQueryRequest;
 import com.kaixuan.agentreproxy.dto.DownstreamApiKeyRequest;
@@ -38,10 +40,13 @@ public class DownstreamApiKeyService {
     private static final String KEY_PREFIX = "ak-";
 
     private final DownstreamApiKeyJdbcRepository repository;
+    private final ObjectMapper objectMapper;
     private final SecureRandom random = new SecureRandom();
 
-    public DownstreamApiKeyService(DownstreamApiKeyJdbcRepository repository) {
+    public DownstreamApiKeyService(DownstreamApiKeyJdbcRepository repository,
+            ObjectMapper objectMapper) {
         this.repository = repository;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -222,6 +227,99 @@ public class DownstreamApiKeyService {
             }
         } catch (Exception e) {
             log.warn("call_count 累加异常 keyId={}: {}", keyId, e.getMessage());
+        }
+    }
+
+    /**
+     * 记录 chat 调用的最终结算信息 —— 落库 + 累加 used_credits
+     * <p>
+     * <strong>调用方</strong>:{@code OpenAiController} 在 SSE 流的 {@code .doOnNext} 里,
+     * 识别出"含 usage 字段的 chunk"后调一次。
+     * <p>
+     * <strong>参数</strong>:{@code rawChunk} 是 <strong>剥掉 {@code data: } 前缀和尾部
+     * {@code \n\n}</strong> 后的纯 JSON 字符串(用户原话:存整段 chunk 文本)。
+     * <p>
+     * <strong>做的事</strong>:
+     * <ol>
+     *   <li>解析 JSON,提取 {@code usage.credit}(浮点;CodeBuddy 自定义,OpenAI 协议无)</li>
+     *   <li>把整段 rawChunk 写入 {@code downstream_api_key_call_log}</li>
+     *   <li>原子累加 {@code downstream_api_key.used_credits}</li>
+     * </ol>
+     * <p>
+     * <strong>不抛异常</strong>:任何一步失败仅记 warn 日志,不影响主流程 chat 响应。
+     * 理由:credit 是观测性数据,且 SSE 已经在透传给客户端,日志/累加失败不应回滚。
+     *
+     * @param keyId     下游 key 主键
+     * @param rawChunk  整段 chunk JSON 文本(已剥 {@code data:} 前缀)
+     */
+    public void recordChatUsage(Long keyId, String rawChunk) {
+        if (keyId == null || rawChunk == null || rawChunk.isBlank()) {
+            return;
+        }
+        try {
+            // 1) 写日志表(整段 chunk 文本)
+            long logId = repository.insertCallLog(rawChunk);
+            if (logId < 0) {
+                log.warn("调用日志插入失败 keyId={}", keyId);
+                return; // 写日志失败不继续累加,避免 credit 累加了但没日志可追溯
+            }
+            // 2) 解析 usage.credit
+            double credit = parseCredit(rawChunk);
+            if (credit <= 0D) {
+                // 没有 credit 字段(老 chunk 格式) 或为 0,只记日志不累加
+                log.debug("chat chunk 不含 usage.credit keyId={} logId={}", keyId, logId);
+                return;
+            }
+            // 3) 累加 used_credits
+            int n = repository.incrementUsedCredits(keyId, credit);
+            if (n == 0) {
+                log.warn("used_credits 累加失败,key 不存在 keyId={}", keyId);
+            } else {
+                log.info("chat 落账:keyId={} credit={} logId={}", keyId, credit, logId);
+            }
+        } catch (Exception e) {
+            // 任何异常不外抛
+            log.warn("recordChatUsage 异常 keyId={}: {}", keyId, e.getMessage());
+        }
+    }
+
+    /**
+     * 从 chunk JSON 中提取 {@code usage.credit} 字段
+     * <p>
+     * CodeBuddy 实际返回两种形态:
+     * <ul>
+     *   <li>{@code "usage":{"credit":5.13, ...}} —— 数值型</li>
+     *   <li>无 credit 字段(老格式 / 中间 chunk) —— 返回 0</li>
+     *   <li>{@code "usage":null} 或缺失 —— 返回 0</li>
+     * </ul>
+     * <p>
+     * 解析失败(非 JSON / 缺字段)不抛,返回 0
+     */
+    private double parseCredit(String rawChunk) {
+        try {
+            JsonNode root = objectMapper.readTree(rawChunk);
+            JsonNode usage = root.path("usage");
+            if (usage.isMissingNode() || usage.isNull()) {
+                return 0D;
+            }
+            JsonNode creditNode = usage.path("credit");
+            if (creditNode.isMissingNode() || creditNode.isNull()) {
+                return 0D;
+            }
+            if (creditNode.isNumber()) {
+                return creditNode.doubleValue();
+            }
+            if (creditNode.isTextual()) {
+                try {
+                    return Double.parseDouble(creditNode.asText().trim());
+                } catch (NumberFormatException ignored) {
+                    return 0D;
+                }
+            }
+            return 0D;
+        } catch (Exception e) {
+            log.debug("parseCredit 失败,忽略: {}", e.getMessage());
+            return 0D;
         }
     }
 }

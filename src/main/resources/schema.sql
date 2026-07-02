@@ -120,3 +120,29 @@ CREATE TABLE IF NOT EXISTS downstream_api_key (
 CREATE INDEX IF NOT EXISTS idx_dstream_apikey_key        ON downstream_api_key(api_key);
 CREATE INDEX IF NOT EXISTS idx_dstream_apikey_created   ON downstream_api_key(created_at);
 CREATE INDEX IF NOT EXISTS idx_dstream_apikey_account   ON downstream_api_key(designated_account_id);
+
+-- 下游 API Key 调用日志表
+--
+-- 用途:每次 /v1/chat/completions 调用,记录上游最终结算 chunk 的完整 JSON
+-- 设计原则:
+--   - 三列结构:id / 完整 chunk JSON / 落库时间
+--   - content 存原始字符串(便于回放 / 调试;CodeBuddy 字段随时变,JSON 反序列化
+--     在写库时不做 —— 让查询端按需反序列化)
+--   - "完整 chunk" 指流结束前最后一个带 usage 字段的 data 块,见 OpenAiController
+--     的 SSE 拦截逻辑
+--   - 不与 downstream_api_key 做 FK 关联(用户要求"三列简单结构",避免 JOIN 复杂度;
+--     需要按 key 过滤日志时,可对 content 字段做 LIKE 模糊匹配或后续加 key_id 列)
+--   - ON DELETE:key 被删时,旧日志保留(审计场景,无 FK CASCADE)
+--
+-- 字段说明:
+--   id:         自增编号
+--   content:    上游最终结算 chunk 的原始 JSON 字符串(整段 data: 后面的内容)
+--   created_at: 落库时间(毫秒)
+
+CREATE TABLE IF NOT EXISTS downstream_api_key_call_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    content     TEXT    NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dstream_call_log_created ON downstream_api_key_call_log(created_at);
