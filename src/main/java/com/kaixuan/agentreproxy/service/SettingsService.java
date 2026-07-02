@@ -198,6 +198,15 @@ public class SettingsService {
             throw new IllegalArgumentException("API Key 已过期: " + keyRec.label());
         }
 
+        // 额度检查:creditLimit = null 表示不限;否则 usedCredits >= creditLimit 直接 401
+        // —— 本期不消耗上游信用,避免给"无意义的请求"打白条
+        var usage = downstreamKeyRepository.findUsageSnapshot(keyRec.id());
+        if (usage != null && usage.hasLimit() && usage.isExhausted()) {
+            log.warn("[chat] key={} (id={}) 额度已用完: used={}, limit={}",
+                    keyRec.label(), keyRec.id(), usage.usedCredits(), usage.creditLimit());
+            throw new IllegalArgumentException("额度已用完: " + keyRec.label());
+        }
+
         String mode = keyRec.consumption() == null || keyRec.consumption().isBlank()
                 ? "designated" : keyRec.consumption().trim();
 

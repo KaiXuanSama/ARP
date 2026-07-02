@@ -171,4 +171,46 @@ public class DownstreamApiKeyJdbcRepository {
                 "ORDER BY " + orderBy + " " + direction + " LIMIT ? OFFSET ?";
         return jdbcTemplate.query(sql, ROW_MAPPER, limit, offset);
     }
-}
+    /**
+     * 查某个 key 的"已用/上限"额度快照 —— 仅取两列
+     * <p>
+     * 用途:{@code SettingsService.resolveAccountForApiKey} 在鉴权时,需要
+     * 比较 {@code usedCredits} 与 {@code creditLimit} 决定是否 401"额度已用完"。
+     * <p>
+     * <strong>不返回整行</strong>:避免 select * 拉 12 列(本表没那么多但仍是好习惯)。
+     * <p>
+     * <strong>creditLimit 为 null = 不限</strong>:本方法用 {@code Double} 包装,Null 表示不限,
+     * 调用方判断 {@code limit == null} 即可放行。
+     *
+     * @return {@code CreditUsageSnapshot(usedCredits, creditLimit)};key 不存在时 {@code null}
+     */
+    public CreditUsageSnapshot findUsageSnapshot(Long id) {
+        // 用 queryForObject + RowMapper 比 query 更省,只取两列
+        return jdbcTemplate.queryForObject(
+                "SELECT used_credits, credit_limit FROM downstream_api_key WHERE id = ?",
+                (rs, rowNum) -> {
+                    double used = rs.getDouble("used_credits");
+                    double limit = rs.getDouble("credit_limit");
+                    boolean limitWasNull = rs.wasNull();
+                    return new CreditUsageSnapshot(
+                            used,
+                            limitWasNull ? null : limit
+                    );
+                },
+                id);
+    }
+
+    /**
+     * 额度快照 record —— service 层只关心两列;不暴露实体 record 避免误用其他字段
+     */
+    public record CreditUsageSnapshot(Double usedCredits, Double creditLimit) {
+        /** 是否有上限(null = 不限) */
+        public boolean hasLimit() {
+            return creditLimit != null;
+        }
+
+        /** 是否已用满(仅在 {@link #hasLimit()} 为 true 时有意义) */
+        public boolean isExhausted() {
+            return creditLimit != null && usedCredits >= creditLimit;
+        }
+    }}

@@ -140,11 +140,6 @@ public class OpenAiController {
         if (element == null || element.isBlank()) {
             return;
         }
-        // 临时诊断日志:记前 80 字符 + 总长度,帮定位"上游到底是 SSE 还是 NDJSON"
-        // 限制:每个 element 第一次都打(量级 ~chat 完成时打几次,不是洪水)
-        log.info("interceptChatChunk enter, keyId={}, len={}, head={}",
-                keyId, element.length(),
-                element.length() > 80 ? element.substring(0, 80) + "..." : element);
         try {
             // 按 \n 切 —— SSE 和 NDJSON 都用 \n 分隔 chunk
             for (String line : element.split("\n")) {
