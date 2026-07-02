@@ -21,9 +21,9 @@ import java.util.Optional;
  * <p>
  * 职责:
  * <ul>
- *   <li>生成不可猜测的随机 key(35 字符,前缀 ak- 便于识别)</li>
- *   <li>CRUD + 分页查询</li>
- *   <li>创建时返回完整明文(只此一次),查询时遮蔽</li>
+ * <li>生成不可猜测的随机 key(35 字符,前缀 ak- 便于识别)</li>
+ * <li>CRUD + 分页查询</li>
+ * <li>创建时返回完整明文(只此一次),查询时遮蔽</li>
  * </ul>
  */
 @Service
@@ -32,8 +32,7 @@ public class DownstreamApiKeyService {
     private static final Logger log = LoggerFactory.getLogger(DownstreamApiKeyService.class);
 
     /** 字母表(去掉了易混淆的 I/O/0/1/l) */
-    private static final String ALPHABET =
-            "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    private static final String ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
     /** 随机部分长度 —— 32 字符 + "ak-" 前缀 = 35 字符,基数约 58^32 ≈ 2.4e56,暴力破解不可行 */
     private static final int RANDOM_LEN = 32;
@@ -65,7 +64,8 @@ public class DownstreamApiKeyService {
      * 创建 key,返回完整明文(仅此一次返回)
      */
     public DownstreamApiKeyItem create(DownstreamApiKeyRequest req) {
-        if (req == null) throw new IllegalArgumentException("请求体不能为空");
+        if (req == null)
+            throw new IllegalArgumentException("请求体不能为空");
         if (req.label() == null || req.label().isBlank()) {
             throw new IllegalArgumentException("label 不能为空");
         }
@@ -89,8 +89,7 @@ public class DownstreamApiKeyService {
                 req.consumption(),
                 req.designatedAccountId(),
                 req.creditLimit(),
-                req.expiresAt()
-        );
+                req.expiresAt());
         // enabled 默认为 1
         if (req.enabled() != null && !req.enabled()) {
             rec = new DownstreamApiKeyRecord(
@@ -105,24 +104,43 @@ public class DownstreamApiKeyService {
     }
 
     /**
-     * 更新 key(label / creditLimit / expiresAt / enabled / consumption / designatedAccountId)
+     * 更新 key(label / creditLimit / expiresAt / enabled / consumption /
+     * designatedAccountId)
      * <p>
      * 注意:不允许通过本接口改 apiKey / callCount / usedCredits
+     * <p>
+     * <strong>关于 {@code creditLimit} / {@code expiresAt} 的 null 语义</strong>:
+     * 这两个字段是"可清空"的业务设置(把积分上限调成 0 / 取消过期时间)。
+     * 约定 <strong>{@code null} = 清空,非 null = 覆盖</strong>(前端永远显式发值,
+     * 即使是 null)。
+     * <p>
+     * 与 {@code enabled} / {@code consumption} / {@code designatedAccountId} 区分:
+     * 那几个字段如果传 null 视为"不修改"(向后兼容,旧客户端可能不传);
+     * 改这个语义会破坏它们的契约。
+     * <p>
+     * <strong>为什么不引入 {@code Optional} / 标志位</strong>:本项目前端同仓库、
+     * 永远发完整 body;record 字段缺省 = null 区分不出"缺失"和"显式 null",
+     * 但本项目两种情况都应走"清空"语义 —— 简化为一个判定。
      */
     public DownstreamApiKeyItem update(Long id, DownstreamApiKeyRequest req) {
-        if (id == null) throw new IllegalArgumentException("id 不能为空");
-        if (req == null) throw new IllegalArgumentException("请求体不能为空");
+        if (id == null)
+            throw new IllegalArgumentException("id 不能为空");
+        if (req == null)
+            throw new IllegalArgumentException("请求体不能为空");
         DownstreamApiKeyRecord existing = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("记录不存在: id=" + id));
 
         String label = req.label() != null && !req.label().isBlank() ? req.label().trim() : existing.label();
-        Double creditLimit = req.creditLimit() != null ? req.creditLimit() : existing.creditLimit();
-        Long expiresAt = req.expiresAt() != null ? req.expiresAt() : existing.expiresAt();
+        // creditLimit / expiresAt: null = 清空(写 NULL),非 null = 覆盖
+        Double creditLimit = req.creditLimit(); // 直接吃前端值,包括 null
+        Long expiresAt = req.expiresAt(); // 同上
         Integer enabled = (req.enabled() != null ? (req.enabled() ? 1 : 0) : existing.enabled());
         String consumption = (req.consumption() != null && !req.consumption().isBlank())
-                ? req.consumption() : existing.consumption();
+                ? req.consumption()
+                : existing.consumption();
         Long designatedAccountId = req.designatedAccountId() != null
-                ? req.designatedAccountId() : existing.designatedAccountId();
+                ? req.designatedAccountId()
+                : existing.designatedAccountId();
 
         repository.update(id, label, creditLimit, expiresAt, enabled, consumption, designatedAccountId);
         DownstreamApiKeyRecord updated = repository.findById(id).orElseThrow();
@@ -131,7 +149,8 @@ public class DownstreamApiKeyService {
     }
 
     public void delete(Long id) {
-        if (id == null) throw new IllegalArgumentException("id 不能为空");
+        if (id == null)
+            throw new IllegalArgumentException("id 不能为空");
         int n = repository.deleteById(id);
         if (n == 0) {
             throw new IllegalArgumentException("记录不存在: id=" + id);
@@ -139,7 +158,8 @@ public class DownstreamApiKeyService {
     }
 
     public PageResult<DownstreamApiKeyItem> queryPage(DownstreamApiKeyQueryRequest req) {
-        DownstreamApiKeyQueryRequest q = req == null ? new DownstreamApiKeyQueryRequest(null, null, null, null, null) : req;
+        DownstreamApiKeyQueryRequest q = req == null ? new DownstreamApiKeyQueryRequest(null, null, null, null, null)
+                : req;
         int pageNum = q.safePageNum();
         int pageSize = q.safePageSize();
         String orderBy = q.safeOrderBy();
@@ -174,9 +194,9 @@ public class DownstreamApiKeyService {
      * <p>
      * 为什么不直接用 repository.update():
      * <ul>
-     *   <li>update() 内部会判空,只有传入的非 null 字段才更新</li>
-     *   <li>走 update() 路径保证和"完整编辑"走同一条 SQL,行为一致</li>
-     *   <li>便于审计 —— 所有"修改单字段"的请求都集中在 update() 里</li>
+     * <li>update() 内部会判空,只有传入的非 null 字段才更新</li>
+     * <li>走 update() 路径保证和"完整编辑"走同一条 SQL,行为一致</li>
+     * <li>便于审计 —— 所有"修改单字段"的请求都集中在 update() 里</li>
      * </ul>
      */
     public DownstreamApiKeyItem updateEnabled(Long id, boolean enabled) {
@@ -194,8 +214,7 @@ public class DownstreamApiKeyService {
                 existing.expiresAt(),
                 enabledInt,
                 existing.consumption(),
-                existing.designatedAccountId()
-        );
+                existing.designatedAccountId());
         DownstreamApiKeyRecord updated = repository.findById(id)
                 .orElseThrow(() -> new IllegalStateException("更新后未找到记录: id=" + id));
         return DownstreamApiKeyItem.from(updated, true);
@@ -241,16 +260,16 @@ public class DownstreamApiKeyService {
      * <p>
      * <strong>做的事</strong>:
      * <ol>
-     *   <li>解析 JSON,提取 {@code usage.credit}(浮点;CodeBuddy 自定义,OpenAI 协议无)</li>
-     *   <li>把整段 rawChunk 写入 {@code downstream_api_key_call_log}</li>
-     *   <li>原子累加 {@code downstream_api_key.used_credits}</li>
+     * <li>解析 JSON,提取 {@code usage.credit}(浮点;CodeBuddy 自定义,OpenAI 协议无)</li>
+     * <li>把整段 rawChunk 写入 {@code downstream_api_key_call_log}</li>
+     * <li>原子累加 {@code downstream_api_key.used_credits}</li>
      * </ol>
      * <p>
      * <strong>不抛异常</strong>:任何一步失败仅记 warn 日志,不影响主流程 chat 响应。
      * 理由:credit 是观测性数据,且 SSE 已经在透传给客户端,日志/累加失败不应回滚。
      *
-     * @param keyId     下游 key 主键
-     * @param rawChunk  整段 chunk JSON 文本(已剥 {@code data:} 前缀)
+     * @param keyId    下游 key 主键
+     * @param rawChunk 整段 chunk JSON 文本(已剥 {@code data:} 前缀)
      */
     public void recordChatUsage(Long keyId, String rawChunk) {
         if (keyId == null || rawChunk == null || rawChunk.isBlank()) {
@@ -288,9 +307,9 @@ public class DownstreamApiKeyService {
      * <p>
      * CodeBuddy 实际返回两种形态:
      * <ul>
-     *   <li>{@code "usage":{"credit":5.13, ...}} —— 数值型</li>
-     *   <li>无 credit 字段(老格式 / 中间 chunk) —— 返回 0</li>
-     *   <li>{@code "usage":null} 或缺失 —— 返回 0</li>
+     * <li>{@code "usage":{"credit":5.13, ...}} —— 数值型</li>
+     * <li>无 credit 字段(老格式 / 中间 chunk) —— 返回 0</li>
+     * <li>{@code "usage":null} 或缺失 —— 返回 0</li>
      * </ul>
      * <p>
      * 解析失败(非 JSON / 缺字段)不抛,返回 0
