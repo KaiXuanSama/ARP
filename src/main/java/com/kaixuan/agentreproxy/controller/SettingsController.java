@@ -7,6 +7,7 @@ import com.kaixuan.agentreproxy.service.SettingsService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -92,5 +93,33 @@ public class SettingsController {
         return Mono.fromCallable(() -> settingsService.previewChatAccountId(mode))
                 .subscribeOn(Schedulers.boundedElastic())
                 .map(preview -> Map.<String, Object>of("data", preview));
+    }
+
+    /**
+     * 批量预览的请求体 —— 只装一个 modes 数组
+     * <p>
+     * 字段可选(默认空 list)以便支持空 POST
+     */
+    public record PreviewBatchRequest(java.util.List<String> modes) {}
+
+    /**
+     * 批量预览接口:一次查多个 mode
+     * <p>
+     * 前端传入要查的 mode 列表(去重,任意顺序),后端逐个调 previewChatAccountId。
+     * <ul>
+     *   <li>失败的 mode 在响应 Map 中对应 null,前端按需降级</li>
+     *   <li>整个请求不会因为某个 mode 失败而 400</li>
+     *   <li>空 modes 列表 → 返回空 Map</li>
+     * </ul>
+     * <p>
+     * 主要场景:账号管理列表加载后,一次性查出所有非 designated 模式对应的"会命中哪个账号"
+     */
+    @PostMapping("/chat.consumption/preview-batch")
+    public Mono<Map<String, Object>> previewChatAccountBatch(
+            @RequestBody(required = false) PreviewBatchRequest req) {
+        java.util.List<String> modes = req == null ? java.util.List.of() : req.modes();
+        return Mono.fromCallable(() -> settingsService.previewChatAccountIdBatch(modes))
+                .subscribeOn(Schedulers.boundedElastic())
+                .map(result -> Map.<String, Object>of("data", result));
     }
 }

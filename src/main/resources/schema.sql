@@ -76,3 +76,47 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_app_settings_key ON app_settings(key);
+
+-- 下游 API Key 表（用户调 chat 用的 key 池）
+--
+-- 用途:每个 key 独立配置消耗方式 + 积分上限 + 有效期 + 启用状态
+-- 设计原则:
+--   - api_key 唯一(随机生成,生成时一次写入,后续不暴露明文给前端列表)
+--   - call_count / used_credits 由 chat 调用时累加(本期任务不实现,字段先建好)
+--   - consumption 与 designated_account_id 替代了原 app_settings.chat.consumption 的语义
+--     但**当前不替换**现有 chat.consumption 设置 —— 后续会平滑迁移
+--   - designated_account_id FK ON DELETE SET NULL —— 账号被删时,key 仍保留(变 null 表示不再指定)
+--   - 时间戳统一毫秒(与 workbuddy_account / checkin_log 保持一致)
+--
+-- 字段说明:
+--   id:                   自增编号
+--   label:                用户给 key 取的别名(便于管理)
+--   api_key:              随机生成的 key 字符串(创建时展示一次)
+--   call_count:           累计调用次数(默认 0)
+--   used_credits:          已使用积分(默认 0,REAL 类型以便小数)
+--   credit_limit:         积分上限(null = 不限)
+--   expires_at:           有效期(毫秒时间戳,null = 永久)
+--   enabled:              启用状态(0/1)
+--   consumption:          消耗方式(字符串,见 ConsumptionMode 常量)
+--   designated_account_id:指定账号 id(仅 consumption='designated' 时生效)
+--   created_at / updated_at:创建/更新时间(毫秒)
+
+CREATE TABLE IF NOT EXISTS downstream_api_key (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    label                TEXT    NOT NULL,
+    api_key              TEXT    NOT NULL UNIQUE,
+    call_count           INTEGER NOT NULL DEFAULT 0,
+    used_credits         REAL    NOT NULL DEFAULT 0,
+    credit_limit         REAL    NULL,
+    expires_at           INTEGER NULL,
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    consumption          TEXT    NOT NULL DEFAULT 'designated',
+    designated_account_id INTEGER NULL,
+    created_at           INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    updated_at           INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    FOREIGN KEY (designated_account_id) REFERENCES workbuddy_account(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dstream_apikey_key        ON downstream_api_key(api_key);
+CREATE INDEX IF NOT EXISTS idx_dstream_apikey_created   ON downstream_api_key(created_at);
+CREATE INDEX IF NOT EXISTS idx_dstream_apikey_account   ON downstream_api_key(designated_account_id);

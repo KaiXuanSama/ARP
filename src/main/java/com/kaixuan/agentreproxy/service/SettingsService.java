@@ -310,8 +310,52 @@ public class SettingsService {
         };
     }
 
-    /**
-     * 内部:从所有账号中选出符合模式的"目标".
+    /**     * 批量预览多个 mode 命中的账号
+     * <p>
+     * 一次调用查多个 mode,前端不用发 N 次 HTTP,节省带宽
+     * <p>
+     * 行为:
+     * <ul>
+     *   <li>输入 modes 是去重后的列表(可以重复,内部去重)</li>
+     *   <li>每个 mode 独立调 previewChatAccountId,捕获异常 → 失败 mode 对应 null</li>
+     *   <li>输入为 null/空 → 返回空 Map</li>
+     *   <li>返回值 Map:key=mode,value=ChatAccountPreview 或 null(失败)</li>
+     * </ul>
+     * <p>
+     * 例:
+     * <pre>
+     * 输入 ["least", "most", "expiring", "designated"]
+     * 输出 {
+     *   "least":    ChatAccountPreview(...),
+     *   "most":     ChatAccountPreview(...),
+     *   "expiring": ChatAccountPreview(...),
+     *   "designated": null   // designated 无预览语义,记录为失败
+     * }
+     * </pre>
+     */
+    public Map<String, ChatAccountPreview> previewChatAccountIdBatch(List<String> modes) {
+        if (modes == null || modes.isEmpty()) {
+            return Map.of();
+        }
+        // 去重 + trim + 过滤空串
+        java.util.LinkedHashMap<String, ChatAccountPreview> result = new java.util.LinkedHashMap<>();
+        for (String raw : modes) {
+            if (raw == null) continue;
+            String m = raw.trim();
+            if (m.isEmpty() || result.containsKey(m)) continue;
+            try {
+                ChatAccountPreview preview = previewChatAccountId(m);
+                result.put(m, preview);
+            } catch (Exception e) {
+                // 单个 mode 失败不影响其他,记录为 null
+                log.warn("[preview batch] mode={} 失败: {}", m, e.getMessage());
+                result.put(m, null);
+            }
+        }
+        return result;
+    }
+
+    /**     * 内部:从所有账号中选出符合模式的"目标".
      * <p>
      * 两种粒度:
      * <ul>

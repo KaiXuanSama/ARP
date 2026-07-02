@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineProps<{
-  name: 'user' | 'home' | 'settings' | 'logout' | 'plus' | 'refresh' | 'search' | 'eye' | 'eye-off' | 'logo'
+  name: 'user' | 'home' | 'settings' | 'logout' | 'plus' | 'refresh' | 'search' | 'eye' | 'eye-off' | 'logo' | 'key' | 'edit' | 'delete' | 'check' | 'check-circle' | 'close' | 'copy' | 'info'
   size?: number | string
   strokeWidth?: number | string
 }>()
@@ -81,6 +81,59 @@ defineProps<{
       <rect x="3" y="3" width="18" height="18" rx="3" />
       <path d="M8 12h8" />
       <path d="M12 8v8" />
+    </g>
+
+    <!-- 钥匙 (key) -->
+    <g v-else-if="name === 'key'">
+      <circle cx="8" cy="15" r="4" />
+      <path d="M10.8 12.2 21 2" />
+      <path d="m18 5 3 3" />
+      <path d="m15 8 2 2" />
+    </g>
+
+    <!-- 编辑 (edit / pencil) -->
+    <g v-else-if="name === 'edit'">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </g>
+
+    <!-- 删除 (delete / trash) -->
+    <g v-else-if="name === 'delete'">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6 17.5 20a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </g>
+
+    <!-- 对勾 (check) -->
+    <g v-else-if="name === 'check'">
+      <polyline points="20 6 9 17 4 12" />
+    </g>
+
+    <!-- 对勾圈 (check-circle) -->
+    <g v-else-if="name === 'check-circle'">
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="9 12 11 14 15 10" />
+    </g>
+
+    <!-- 关闭 (close / x) -->
+    <g v-else-if="name === 'close'">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </g>
+
+    <!-- 复制 (copy) -->
+    <g v-else-if="name === 'copy'">
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </g>
+
+    <!-- 信息 (info) -->
+    <g v-else-if="name === 'info'">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
     </g>
   </svg>
 </template>

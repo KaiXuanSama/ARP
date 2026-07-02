@@ -6,14 +6,15 @@ import Icon from './Icon.vue'
 interface NavItem {
   key: string
   label: string
-  icon: 'home' | 'user' | 'settings'
+  icon: 'home' | 'user' | 'settings' | 'key'
   disabled?: boolean
   to: string
 }
 
 const navItems: NavItem[] = [
-  { key: 'overview', label: '概览', icon: 'home', to: '/overview' },
-  { key: 'accounts', label: '账号管理', icon: 'user', to: '/accounts' },
+  { key: 'overview', label: '总览', icon: 'home', to: '/overview' },
+  { key: 'accounts', label: '上游账号管理', icon: 'user', to: '/accounts' },
+  { key: 'downstream-keys', label: '下游账号管理', icon: 'key', to: '/downstream-keys' },
   { key: 'settings', label: '系统设置', icon: 'settings', to: '/settings' },
 ]
 
