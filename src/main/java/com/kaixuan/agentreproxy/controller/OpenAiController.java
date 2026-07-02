@@ -1,6 +1,7 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.model.ModelConfig;
+import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
@@ -45,13 +46,16 @@ public class OpenAiController {
     private final UpstreamClient upstream;
     private final ModelsConfigService modelsConfig;
     private final SettingsService settingsService;
+    private final ChatUsageRefreshScheduler usageRefreshScheduler;
 
     public OpenAiController(UpstreamClient upstream,
             ModelsConfigService modelsConfig,
-            SettingsService settingsService) {
+            SettingsService settingsService,
+            ChatUsageRefreshScheduler usageRefreshScheduler) {
         this.upstream = upstream;
         this.modelsConfig = modelsConfig;
         this.settingsService = settingsService;
+        this.usageRefreshScheduler = usageRefreshScheduler;
     }
 
     // ============== Chat Completions ==============
@@ -68,13 +72,17 @@ public class OpenAiController {
         if (!body.containsKey("stream_options")) {
             body.put("stream_options", Map.of("include_usage", true));
         }
-        // 校验 messages >= 2，否则上游会返回 400
+        // 校验 messages >= 2,否则上游会返回 400
         Object messages = body.get("messages");
         if (!(messages instanceof List<?> list) || list.size() < 2) {
-            return Flux.error(new IllegalArgumentException("messages 至少需要 2 条（需包含 system 消息）"));
+            return Flux.error(new IllegalArgumentException("messages 至少需要 2 条(需包含 system 消息)"));
         }
         return settingsService.resolveChatAccountId()
-                .flatMapMany(accountId -> upstream.postChatStreamForAccount(accountId, body));
+                .flatMapMany(accountId -> {
+                    // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
+                    usageRefreshScheduler.scheduleRefreshAfterChat(accountId);
+                    return upstream.postChatStreamForAccount(accountId, body);
+                });
     }
 
     // ============== Models ==============
