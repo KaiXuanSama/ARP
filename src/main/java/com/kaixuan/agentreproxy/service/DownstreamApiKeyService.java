@@ -6,6 +6,8 @@ import com.kaixuan.agentreproxy.dto.DownstreamApiKeyRequest;
 import com.kaixuan.agentreproxy.dto.PageResult;
 import com.kaixuan.agentreproxy.entity.DownstreamApiKeyRecord;
 import com.kaixuan.agentreproxy.repository.DownstreamApiKeyJdbcRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
@@ -24,6 +26,8 @@ import java.util.Optional;
  */
 @Service
 public class DownstreamApiKeyService {
+
+    private static final Logger log = LoggerFactory.getLogger(DownstreamApiKeyService.class);
 
     /** 字母表(去掉了易混淆的 I/O/0/1/l) */
     private static final String ALPHABET =
@@ -190,5 +194,34 @@ public class DownstreamApiKeyService {
         DownstreamApiKeyRecord updated = repository.findById(id)
                 .orElseThrow(() -> new IllegalStateException("更新后未找到记录: id=" + id));
         return DownstreamApiKeyItem.from(updated, true);
+    }
+
+    /**
+     * 记录一次 chat 调用 —— 给指定 key 累加 call_count
+     * <p>
+     * <strong>调用方</strong>:{@code OpenAiController.chatCompletions} 鉴权通过、即将
+     * 调上游之前调一次。
+     * <p>
+     * <strong>不抛异常</strong>:累加失败仅记 warn 日志,不影响主流程 chat 调用。
+     * 理由:call_count 是观测性数据(给 B 端用户看用了多少次),不影响业务正确性。
+     * <p>
+     * <strong>不走 reactor</strong>:本方法被 chat 流调用,本身在 reactor 线程上,
+     * 内部用 {@code .subscribeOn(boundedElastic)} 切到 blocking 池跑 JDBC,
+     * 跟项目其他阻塞 IO 一致。
+     */
+    public void recordCall(Long keyId) {
+        if (keyId == null) {
+            return;
+        }
+        try {
+            int n = repository.incrementCallCount(keyId);
+            if (n == 0) {
+                // 极小概率:key 在鉴权通过后、累加之前被并发删除(无 ON DELETE CASCADE,
+                // 因为 downstream_api_key 是独立的,不会因 workbuddy_account 删除而删)
+                log.warn("call_count 累加失败,key 不存在 id={}", keyId);
+            }
+        } catch (Exception e) {
+            log.warn("call_count 累加异常 keyId={}: {}", keyId, e.getMessage());
+        }
     }
 }

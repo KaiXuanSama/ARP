@@ -94,6 +94,25 @@ public class DownstreamApiKeyJdbcRepository {
         return list.stream().findFirst();
     }
 
+    /**
+     * 原子累加 call_count —— /v1/chat/completions 每次成功鉴权后 +1
+     * <p>
+     * SQL 用 {@code SET call_count = call_count + 1} 直接累加,避免 read-modify-write 竞态。
+     * 顺带刷新 {@code updated_at} 以便前端表格能展示"最近一次调用时间"。
+     * <p>
+     * 返回受影响的行数:0 = id 不存在(已被并发删除);1 = 累加成功。
+     * <p>
+     * <strong>不累加 used_credits</strong> —— 计费来源在上游 chat 响应的最后一条 stream chunk
+     * (含 {@code usage.prompt_tokens / completion_tokens} 等),本期没有从上游解析该字段,
+     * 字段保留在 schema 供后续接计费时使用。
+     */
+    public int incrementCallCount(Long id) {
+        return jdbcTemplate.update(
+                "UPDATE downstream_api_key SET call_count = call_count + 1, " +
+                        "updated_at = (strftime('%s', 'now') * 1000) WHERE id = ?",
+                id);
+    }
+
     /** 总数(分页用) */
     public long count() {
         Long cnt = jdbcTemplate.queryForObject(

@@ -2,6 +2,7 @@ package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.model.ModelConfig;
 import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
+import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
@@ -50,15 +51,18 @@ public class OpenAiController {
     private final ModelsConfigService modelsConfig;
     private final SettingsService settingsService;
     private final ChatUsageRefreshScheduler usageRefreshScheduler;
+    private final DownstreamApiKeyService downstreamApiKeyService;
 
     public OpenAiController(UpstreamClient upstream,
             ModelsConfigService modelsConfig,
             SettingsService settingsService,
-            ChatUsageRefreshScheduler usageRefreshScheduler) {
+            ChatUsageRefreshScheduler usageRefreshScheduler,
+            DownstreamApiKeyService downstreamApiKeyService) {
         this.upstream = upstream;
         this.modelsConfig = modelsConfig;
         this.settingsService = settingsService;
         this.usageRefreshScheduler = usageRefreshScheduler;
+        this.downstreamApiKeyService = downstreamApiKeyService;
     }
 
     // ============== Chat Completions ==============
@@ -89,10 +93,12 @@ public class OpenAiController {
         return settingsService.resolveAccountForApiKey(authorization)
                 .onErrorMap(IllegalArgumentException.class,
                         e -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, e.getMessage()))
-                .flatMapMany(accountId -> {
-                    // 触发3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
-                    usageRefreshScheduler.scheduleRefreshAfterChat(accountId);
-                    return upstream.postChatStreamForAccount(accountId, body);
+                .flatMapMany(ctx -> {
+                    // 鉴权通过,累加下游 key 的 call_count(失败不影响主流程,内部 catch)
+                    downstreamApiKeyService.recordCall(ctx.keyId());
+                    // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
+                    usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
+                    return upstream.postChatStreamForAccount(ctx.accountId(), body);
                 });
     }
 

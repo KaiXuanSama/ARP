@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaixuan.agentreproxy.dto.AppSettingResponse;
 import com.kaixuan.agentreproxy.dto.ChatAccountPreview;
+import com.kaixuan.agentreproxy.dto.ChatRoutingContext;
 import com.kaixuan.agentreproxy.dto.ConsumptionSettingValue;
 import com.kaixuan.agentreproxy.dto.UpdateConsumptionSettingRequest;
 import com.kaixuan.agentreproxy.entity.AppSettingRecord;
@@ -173,19 +174,19 @@ public class SettingsService {
      * 等计费模块上线再接。
      *
      * @param bearerToken 请求头 Authorization 的值,形如 "Bearer ak-xxxxx"
-     * @return 命中账号的主键
+     * @return {@link ChatRoutingContext} 同时携带目标 accountId 和被命中的下游 keyId
      */
-    public Mono<Long> resolveAccountForApiKey(String bearerToken) {
+    public Mono<ChatRoutingContext> resolveAccountForApiKey(String bearerToken) {
         return Mono.fromCallable(() -> resolveAccountForApiKeyBlocking(bearerToken))
                 .subscribeOn(Schedulers.boundedElastic());
     }
 
     /**
-     * 同步版:按 key 解析账号。跑在 boundedElastic 上。
+     * 同步版:按 key 解析账号 + keyId。跑在 boundedElastic 上。
      * <p>
      * 抛 {@link IllegalArgumentException} 表示鉴权/校验失败,controller 应映射为 401。
      */
-    private Long resolveAccountForApiKeyBlocking(String bearerToken) {
+    private ChatRoutingContext resolveAccountForApiKeyBlocking(String bearerToken) {
         String apiKey = extractApiKey(bearerToken);
         DownstreamApiKeyRecord keyRec = downstreamKeyRepository.findByApiKey(apiKey)
                 .orElseThrow(() -> new IllegalArgumentException("无效的 API Key"));
@@ -198,8 +199,7 @@ public class SettingsService {
         }
 
         String mode = keyRec.consumption() == null || keyRec.consumption().isBlank()
-                ? "designated"
-                : keyRec.consumption().trim();
+                ? "designated" : keyRec.consumption().trim();
 
         Long accountId = switch (mode) {
             case "designated" -> {
@@ -237,7 +237,7 @@ public class SettingsService {
             default -> throw new IllegalArgumentException(
                     "key=" + keyRec.label() + " consumption 非法: " + mode);
         };
-        return accountId;
+        return new ChatRoutingContext(accountId, keyRec.id());
     }
 
     /**
