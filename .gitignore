@@ -71,4 +71,4 @@ src/main/resources/static/index.html
 .github
 
 # JSON files
-*.json
+/*.json

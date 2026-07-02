@@ -1,16 +1,16 @@
 spring:
   application:
     name: agentreproxy
-
-  # SQLite 数据源配置（关键：无此配置服务无法启动）
+  # SQLite 数据源（位于项目根目录）
   datasource:
-    url: jdbc:sqlite:admin.db
+    url: ${SQLITE_URL:jdbc:sqlite:${user.dir}/agentreproxy.db}
     driver-class-name: org.sqlite.JDBC
-
-  # 自动执行 schema.sql 初始化表结构
+    hikari:
+      maximum-pool-size: 10
   sql:
     init:
       mode: always
+      schema-locations: classpath:schema.sql
 
   # WebFlux 内存缓冲阈值:与 application.yml 保持一致(25MB)。
   # 路径在 Spring 3.5 改为 spring.http.codecs.*(旧 spring.codec.* 已弃用)。
@@ -27,4 +27,4 @@ server:
 #   - 也可写成 /etc/agentreproxy/modelsConfig.json,通过 -v 挂载进来
 models:
   config:
-    path: ./modelsConfig.json
+    path: ${MODELS_CONFIG_PATH:./modelsConfig.json}
