@@ -5,12 +5,15 @@ import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -19,28 +22,28 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * OpenAI 兼容端点（/v1/*）
+ * OpenAI兼容端点（/v1/*）
  * <p>
  * 让任意 OpenAI SDK（openai-python / langchain / OpenAI Node 等）能以本服务为 base URL
- * 直接调用。
- * 上游是 CodeBuddy（本身就走 OpenAI 协议），所以这里只做"加 /v1 前缀 + 字段补全 + 鉴权透传"的轻量包装。
+ * 直接调用。上游是 CodeBuddy（本身就走 OpenAI协议），所以这里只做"加 /v1前缀 + 字段补全 +
+ * 鉴权透传"的轻量包装。
  * <p>
- * <strong>当前限制</strong>：
+ * <strong>Chat路由（已迁移到 per-key）</strong>：
  * <ul>
- * <li>Chat端点当前支持“指定模式 / 临期优先”——读取设置表里的 {@code chat.consumption}，解析出目标 accountId
- * 路由</li>
- * <li>若指定账号使用 accessToken → Authorization + X-User-Id + X-Domain；若使用 API Key →仅
- * Authorization</li>
- * <li>“量少优先 /量多优先”暂未实现；“临期优先”会从本地缓存的 credit.packages 中挑最先过期且余量 &gt;0 的账号</li>
- * <li>只暴露 OpenAI 协议的一小部分（chat/completions + models）；embedding / completions /
- * files 等暂未实现</li>
+ * <li>从请求头 {@code Authorization: Bearer ak-xxxxx}提取下游 API Key</li>
+ * <li>按 key 自己的 {@code consumption} 字段（designated / least / most /
+ * expiring）选号</li>
+ * <li>全局 {@code app_settings.chat.consumption} 设置已废弃，不再被 chat路由消费</li>
+ * <li>key 不存在 /禁用 / 过期 →401 Unauthorized</li>
+ * <li>只暴露 OpenAI协议的一小部分（chat/completions + models）；embedding / completions /
+ * files等暂未实现</li>
  * </ul>
  */
 @RestController
 @RequestMapping("/v1")
 public class OpenAiController {
 
-    /** OpenAI 风格 list 响应里的硬编码时间戳锚点（秒）。固定值避免每次响应 created 变化导致客户端误判模型列表更新 */
+    /** OpenAI风格 list响应里的硬编码时间戳锚点（秒）。固定值避免每次响应 created变化导致客户端误判模型列表更新 */
     private static final long MODELS_CREATED_AT = 1700000000L; // 2023-11-14T22:13:20Z
 
     private final UpstreamClient upstream;
@@ -61,25 +64,33 @@ public class OpenAiController {
     // ============== Chat Completions ==============
 
     /**
-     * OpenAI 兼容的 Chat 补全（流式 SSE 透传）
+     * OpenAI兼容的 Chat补全（流式 SSE透传）
      * <p>
-     * 强制 stream=true、补 stream_options、校验 messages >= 2。
+     * 强制 stream=true、补 stream_options、校验 messages >=2。
+     * <p>
+     * 鉴权：从 {@code Authorization: Bearer ak-xxxxx}提取下游 API Key，
+     * 按 key 的 consumption 字段选号。key 不存在/禁用/过期 →401。
      */
     @PostMapping(value = "/chat/completions", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<String> chatCompletions(@RequestBody Map<String, Object> body) {
+    public Flux<String> chatCompletions(
+            @RequestHeader(value = "Authorization", required = false) String authorization,
+            @RequestBody Map<String, Object> body) {
         // 强制上游只接受 stream=true
         body.put("stream", true);
         if (!body.containsKey("stream_options")) {
             body.put("stream_options", Map.of("include_usage", true));
         }
-        // 校验 messages >= 2,否则上游会返回 400
+        // 校验 messages >=2,否则上游会返回400
         Object messages = body.get("messages");
         if (!(messages instanceof List<?> list) || list.size() < 2) {
-            return Flux.error(new IllegalArgumentException("messages 至少需要 2 条(需包含 system 消息)"));
+            return Flux.error(new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "messages 至少需要2 条(需包含 system消息)"));
         }
-        return settingsService.resolveChatAccountId()
+        return settingsService.resolveAccountForApiKey(authorization)
+                .onErrorMap(IllegalArgumentException.class,
+                        e -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, e.getMessage()))
                 .flatMapMany(accountId -> {
-                    // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
+                    // 触发3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
                     usageRefreshScheduler.scheduleRefreshAfterChat(accountId);
                     return upstream.postChatStreamForAccount(accountId, body);
                 });

@@ -7,8 +7,10 @@ import com.kaixuan.agentreproxy.dto.ChatAccountPreview;
 import com.kaixuan.agentreproxy.dto.ConsumptionSettingValue;
 import com.kaixuan.agentreproxy.dto.UpdateConsumptionSettingRequest;
 import com.kaixuan.agentreproxy.entity.AppSettingRecord;
+import com.kaixuan.agentreproxy.entity.DownstreamApiKeyRecord;
 import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
 import com.kaixuan.agentreproxy.repository.AppSettingJdbcRepository;
+import com.kaixuan.agentreproxy.repository.DownstreamApiKeyJdbcRepository;
 import com.kaixuan.agentreproxy.repository.WorkbuddyAccountJdbcRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,13 +60,16 @@ public class SettingsService {
 
     private final AppSettingJdbcRepository repository;
     private final WorkbuddyAccountJdbcRepository accountRepository;
+    private final DownstreamApiKeyJdbcRepository downstreamKeyRepository;
     private final ObjectMapper objectMapper;
 
     public SettingsService(AppSettingJdbcRepository repository,
             WorkbuddyAccountJdbcRepository accountRepository,
+            DownstreamApiKeyJdbcRepository downstreamKeyRepository,
             ObjectMapper objectMapper) {
         this.repository = repository;
         this.accountRepository = accountRepository;
+        this.downstreamKeyRepository = downstreamKeyRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -139,6 +144,125 @@ public class SettingsService {
     public Mono<Long> resolveChatAccountId() {
         return Mono.fromCallable(this::resolveChatAccountIdBlocking)
                 .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    /**
+     * 为 OpenAI Chat 路由按下游 API Key 解析目标账号(响应式包装)。
+     * <p>
+     * <strong>这是 /v1/chat/completions 当前的权威入口</strong> —— 全局
+     * {@code chat.consumption}
+     * 设置已废弃,chat 路由改为按请求头 {@code Authorization: Bearer ak-...} 提取 key,
+     * 再按 key 自己的 {@code consumption} 字段选号,实现"每个下游 key 独立消耗策略"。
+     * <p>
+     * 校验链(任一失败抛 {@link IllegalArgumentException} → controller 映射 401):
+     * <ol>
+     * <li>key 不为空且以 {@code ak-} 开头</li>
+     * <li>key 在 {@code downstream_api_key} 表中存在</li>
+     * <li>key 处于启用状态({@code enabled=1})</li>
+     * <li>key 未过期({@code expires_at} 为 null 或 &gt; now)</li>
+     * <li>key 的 {@code consumption} 字段合法,且按该 mode 能选出账号</li>
+     * </ol>
+     * <p>
+     * 选号复用 {@link #resolveExpiringPriorityChatAccountId()} /
+     * {@link #resolveLeastPriorityChatAccountId()} /
+     * {@link #resolveMostPriorityChatAccountId()} /
+     * {@link #resolveDesignatedChatAccountId(ConsumptionSettingValue)} ——
+     * 不重写选号逻辑,只是把"全局设置"换成"per-key 设置"。
+     * <p>
+     * <strong>creditLimit / usedCredits 本期仍不累加</strong> —— 字段已存但 chat 路由不消费,
+     * 等计费模块上线再接。
+     *
+     * @param bearerToken 请求头 Authorization 的值,形如 "Bearer ak-xxxxx"
+     * @return 命中账号的主键
+     */
+    public Mono<Long> resolveAccountForApiKey(String bearerToken) {
+        return Mono.fromCallable(() -> resolveAccountForApiKeyBlocking(bearerToken))
+                .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    /**
+     * 同步版:按 key 解析账号。跑在 boundedElastic 上。
+     * <p>
+     * 抛 {@link IllegalArgumentException} 表示鉴权/校验失败,controller 应映射为 401。
+     */
+    private Long resolveAccountForApiKeyBlocking(String bearerToken) {
+        String apiKey = extractApiKey(bearerToken);
+        DownstreamApiKeyRecord keyRec = downstreamKeyRepository.findByApiKey(apiKey)
+                .orElseThrow(() -> new IllegalArgumentException("无效的 API Key"));
+
+        if (!keyRec.isEnabled()) {
+            throw new IllegalArgumentException("API Key 已禁用: " + keyRec.label());
+        }
+        if (keyRec.expiresAt() != null && keyRec.expiresAt() < System.currentTimeMillis()) {
+            throw new IllegalArgumentException("API Key 已过期: " + keyRec.label());
+        }
+
+        String mode = keyRec.consumption() == null || keyRec.consumption().isBlank()
+                ? "designated"
+                : keyRec.consumption().trim();
+
+        Long accountId = switch (mode) {
+            case "designated" -> {
+                Long designatedId = keyRec.designatedAccountId();
+                if (designatedId == null) {
+                    throw new IllegalArgumentException(
+                            "key=" + keyRec.label() + " 为指定模式,但未配置 designatedAccountId");
+                }
+                if (accountRepository.findById(designatedId).isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "key=" + keyRec.label() + " 指定账号不存在: " + designatedId);
+                }
+                log.info("[chat] key={} (id={}) designated → accountId={}",
+                        keyRec.label(), keyRec.id(), designatedId);
+                yield designatedId;
+            }
+            case "expiring" -> {
+                Long picked = resolveExpiringPriorityChatAccountId();
+                log.info("[chat] key={} (id={}) expiring → accountId={}",
+                        keyRec.label(), keyRec.id(), picked);
+                yield picked;
+            }
+            case "least" -> {
+                Long picked = resolveLeastPriorityChatAccountId();
+                log.info("[chat] key={} (id={}) least → accountId={}",
+                        keyRec.label(), keyRec.id(), picked);
+                yield picked;
+            }
+            case "most" -> {
+                Long picked = resolveMostPriorityChatAccountId();
+                log.info("[chat] key={} (id={}) most → accountId={}",
+                        keyRec.label(), keyRec.id(), picked);
+                yield picked;
+            }
+            default -> throw new IllegalArgumentException(
+                    "key=" + keyRec.label() + " consumption 非法: " + mode);
+        };
+        return accountId;
+    }
+
+    /**
+     * 从 {@code Authorization: Bearer ak-xxxxx} 提取 {@code ak-xxxxx}。
+     * <p>
+     * 兼容三种形态:大小写 Bearer / 多个空格 / 纯 key(无 Bearer 前缀,兜底)
+     */
+    private static String extractApiKey(String bearerToken) {
+        if (bearerToken == null || bearerToken.isBlank()) {
+            throw new IllegalArgumentException("缺少 Authorization 头");
+        }
+        String trimmed = bearerToken.trim();
+        String key = trimmed;
+        // 兼容 "Bearer xxx" / "bearer xxx"
+        int space = trimmed.indexOf(' ');
+        if (space > 0) {
+            String scheme = trimmed.substring(0, space);
+            if ("Bearer".equalsIgnoreCase(scheme)) {
+                key = trimmed.substring(space + 1).trim();
+            }
+        }
+        if (key.isBlank()) {
+            throw new IllegalArgumentException("Authorization 头缺少 token");
+        }
+        return key;
     }
 
     /**
@@ -310,19 +434,21 @@ public class SettingsService {
         };
     }
 
-    /**     * 批量预览多个 mode 命中的账号
+    /**
+     * * 批量预览多个 mode 命中的账号
      * <p>
      * 一次调用查多个 mode,前端不用发 N 次 HTTP,节省带宽
      * <p>
      * 行为:
      * <ul>
-     *   <li>输入 modes 是去重后的列表(可以重复,内部去重)</li>
-     *   <li>每个 mode 独立调 previewChatAccountId,捕获异常 → 失败 mode 对应 null</li>
-     *   <li>输入为 null/空 → 返回空 Map</li>
-     *   <li>返回值 Map:key=mode,value=ChatAccountPreview 或 null(失败)</li>
+     * <li>输入 modes 是去重后的列表(可以重复,内部去重)</li>
+     * <li>每个 mode 独立调 previewChatAccountId,捕获异常 → 失败 mode 对应 null</li>
+     * <li>输入为 null/空 → 返回空 Map</li>
+     * <li>返回值 Map:key=mode,value=ChatAccountPreview 或 null(失败)</li>
      * </ul>
      * <p>
      * 例:
+     * 
      * <pre>
      * 输入 ["least", "most", "expiring", "designated"]
      * 输出 {
@@ -340,9 +466,11 @@ public class SettingsService {
         // 去重 + trim + 过滤空串
         java.util.LinkedHashMap<String, ChatAccountPreview> result = new java.util.LinkedHashMap<>();
         for (String raw : modes) {
-            if (raw == null) continue;
+            if (raw == null)
+                continue;
             String m = raw.trim();
-            if (m.isEmpty() || result.containsKey(m)) continue;
+            if (m.isEmpty() || result.containsKey(m))
+                continue;
             try {
                 ChatAccountPreview preview = previewChatAccountId(m);
                 result.put(m, preview);
@@ -355,7 +483,8 @@ public class SettingsService {
         return result;
     }
 
-    /**     * 内部:从所有账号中选出符合模式的"目标".
+    /**
+     * * 内部:从所有账号中选出符合模式的"目标".
      * <p>
      * 两种粒度:
      * <ul>

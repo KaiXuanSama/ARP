@@ -150,7 +150,7 @@ async function loadAccounts(): Promise<void> {
 /**
  * Naive UI render-label 渲染函数
  * <p>
- * 显示格式: 昵称（credit.remain / credit.size）
+ * 昵称（credit.remain / credit.size）
  * <p>
  * 没昵称时退化为 uid;没 credit 快照时括号内显示 "-"
  * <p>
@@ -381,6 +381,12 @@ onMounted(async () => {
       <div class="card-header">
         <h3 class="card-title">对话模式</h3>
         <p class="card-desc">控制对话请求命中账号的策略。后续接 Chat / Billing 路由时使用。</p>
+        <p class="card-deprecated-hint">
+          <Icon name="settings" :size="12" />
+          此全局设置已废弃，对话路由已迁移到
+          <router-link to="/downstream-keys">下游账号管理</router-link>
+          的 per-key 消耗方式。此处的设置仅保留作为历史参考，不再被 /v1/chat/completions 消费。
+        </p>
       </div>
       <div class="card-body">
         <div class="form-row">
@@ -493,6 +499,34 @@ onMounted(async () => {
   font-size: 12px;
   color: #8c8c8c;
   line-height: 1.5;
+}
+
+.card-deprecated-hint {
+  margin: 8px 0 0 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8c8c8c;
+  background: #fafbfc;
+  border: 1px solid #ececf0;
+  border-radius: 6px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.card-deprecated-hint a {
+  color: #18a058;
+  text-decoration: none;
+}
+
+.card-deprecated-hint a:hover {
+  text-decoration: underline;
+}
+
+.card-deprecated-hint :deep(svg) {
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 .card-body {
