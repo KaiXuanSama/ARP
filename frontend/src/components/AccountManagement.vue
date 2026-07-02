@@ -9,6 +9,7 @@ import {
  NDropdown,
  NInput,
  NModal,
+ NPagination,
  NSpin,
  NSpace,
  NUpload,
@@ -428,9 +429,13 @@ const columns: DataTableColumns<AccountRow> = [
  if (!row.checkin) {
  return h('span', { style: { color: '#999' } }, '未知')
  }
- return row.checkin.checkedIn
- ? h('span', { style: { color: '#18a058', fontWeight: '500' } }, '已签到')
- : h('span', { style: { color: '#f0a020', fontWeight: '500' } }, '未签到')
+ const __ckText = row.checkin.checkedIn ? '已签到' : '未签到'
+ const __ckColor = row.checkin.checkedIn ? '#18a058' : '#f0a020'
+ return h(NButton, {
+  quaternary: true, size: 'tiny',
+  style: { color: __ckColor, fontWeight: '500', padding: '0 4px' },
+  onClick: () => openHistoryModal(row),
+ }, () => __ckText)
  },
  },
  {
@@ -915,6 +920,154 @@ onMounted(async () => {
  await refreshExtras()
  await queryCheckinStatus()
 })
+
+// ============== 签到历史日志模态框 ==============
+
+/**
+ * 单条签到历史日志条目（与后端 CheckinLogItem 字段对齐）
+ * <p>
+ * extra 字段为 Object（通常是 Map），便于直接渲染
+ */
+interface CheckinLogItem {
+ id: number
+ accountId: number
+ checkinType: string
+ checkinTime: number
+ extra: Record<string, unknown> | string | null
+}
+
+/**
+ * 历史日志模态框状态
+ * <p>
+ * 设计原则:历史日志是"只读视图",不修改表格行的任何状态。
+ * 翻页/排序在模态框内独立管理,与签到主流程解耦。
+ */
+const showHistoryModal = ref(false)
+const historyAccountId = ref<number | null>(null)
+const historyAccountName = ref('')
+const historyList = ref<CheckinLogItem[]>([])
+const historyTotal = ref(0)
+const historyPages = ref(0)
+const historyPageNum = ref(1)
+const historyPageSize = ref(10)
+const historyOrderBy = ref('checkin_time')
+const historyAsc = ref(false)
+const historyLoading = ref(false)
+const historyError = ref<string | null>(null)
+
+/**
+ * 历史模态框分页列定义
+ * <p>
+ * id / 类型 / 签到时间(格式化) / 扩展信息(展开查看)
+ */
+const historyColumns: DataTableColumns<CheckinLogItem> = [
+ { title: '编号', key: 'id', width: 70 },
+ { title: '类型', key: 'checkinType', width: 90 },
+ {
+  title: '签到时间',
+  key: 'checkinTime',
+  width: 180,
+  render: (row: CheckinLogItem) => formatTime(row.checkinTime),
+ },
+ {
+  title: '扩展信息',
+  key: 'extra',
+  ellipsis: { tooltip: true },
+  render: (row: CheckinLogItem) => {
+   if (row.extra == null) return '-'
+   if (typeof row.extra === 'string') return row.extra
+   try {
+    return JSON.stringify(row.extra)
+   } catch {
+    return String(row.extra)
+   }
+  },
+ },
+]
+
+/**
+ * 打开历史日志模态框
+ * <p>
+ * 入口:点击表格"当日签到状态"列
+ */
+function openHistoryModal(row: AccountRow): void {
+ historyAccountId.value = row.id
+ historyAccountName.value = row.nickname || row.uid || `账号 #${row.id}`
+ historyPageNum.value = 1
+ showHistoryModal.value = true
+ void loadHistory()
+}
+
+/**
+ * 关闭模态框
+ */
+function closeHistoryModal(): void {
+ showHistoryModal.value = false
+ historyList.value = []
+ historyError.value = null
+}
+
+/**
+ * 拉取一页历史日志
+ */
+async function loadHistory(): Promise<void> {
+ if (historyAccountId.value == null) return
+ historyLoading.value = true
+ historyError.value = null
+ try {
+  const res = await fetch('/api/checkin/history', {
+   method: 'POST',
+   headers: { 'Content-Type': 'application/json' },
+   body: JSON.stringify({
+    accountId: historyAccountId.value,
+    pageNum: historyPageNum.value,
+    pageSize: historyPageSize.value,
+    orderBy: historyOrderBy.value,
+    asc: historyAsc.value,
+   }),
+  })
+  if (!res.ok) {
+   throw new Error(`HTTP ${res.status}`)
+  }
+  const body = await res.json()
+  const page = body?.data
+  if (!page) {
+   throw new Error('响应格式异常:缺少 data 字段')
+  }
+  historyList.value = Array.isArray(page.list) ? page.list : []
+  historyTotal.value = Number(page.total ?? 0)
+  historyPages.value = Number(page.pages ?? 0)
+ } catch (e: unknown) {
+  const msg = e instanceof Error ? e.message : '未知错误'
+  historyError.value = `加载历史失败: ${msg}`
+  historyList.value = []
+  historyTotal.value = 0
+  historyPages.value = 0
+ } finally {
+  historyLoading.value = false
+ }
+}
+
+/**
+ * 翻页/排序变化
+ */
+function onHistoryPageChange(p: number): void {
+ historyPageNum.value = p
+ void loadHistory()
+}
+
+function onHistoryPageSizeChange(s: number): void {
+ historyPageSize.value = s
+ historyPageNum.value = 1
+ void loadHistory()
+}
+
+function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
+ historyOrderBy.value = value.orderBy
+ historyAsc.value = value.asc
+ historyPageNum.value = 1
+ void loadHistory()
+}
 </script>
 
 <template>
@@ -1102,6 +1255,63 @@ onMounted(async () => {
         </n-space>
       </template>
     </n-modal>
+
+    <!-- 签到历史日志模态框（点击"当日签到状态"列触发） -->
+    <n-modal
+      v-model:show="showHistoryModal"
+      preset="card"
+      :title="`签到历史 · ${historyAccountName}`"
+      style="width: 880px;"
+      :on-after-leave="closeHistoryModal"
+    >
+      <!-- 排序工具栏：表格上方靠左 -->
+      <n-space align="center" size="small" style="margin-bottom: 8px;">
+        <span class="history-summary">排序：</span>
+        <n-button
+          size="tiny"
+          :type="historyOrderBy === 'checkin_time' && !historyAsc ? 'primary' : 'default'"
+          @click="onHistorySortChange({ orderBy: 'checkin_time', asc: false })"
+        >时间倒序</n-button>
+        <n-button
+          size="tiny"
+          :type="historyOrderBy === 'checkin_time' && historyAsc ? 'primary' : 'default'"
+          @click="onHistorySortChange({ orderBy: 'checkin_time', asc: true })"
+        >时间正序</n-button>
+        <n-button
+          size="tiny"
+          :type="historyOrderBy === 'id' ? 'primary' : 'default'"
+          @click="onHistorySortChange({ orderBy: 'id', asc: false })"
+        >按 ID</n-button>
+      </n-space>
+      <n-data-table
+        :columns="historyColumns"
+        :data="historyList"
+        :loading="historyLoading"
+        :bordered="false"
+        :single-line="false"
+        size="small"
+        :row-key="(row: CheckinLogItem) => row.id"
+      />
+      <div v-if="historyError" class="history-error">{{ historyError }}</div>
+      <div v-else-if="!historyLoading && historyList.length === 0" class="history-empty">暂无签到记录</div>
+      <n-space justify="space-between" align="center" style="margin-top: 12px;">
+        <span class="history-summary">共 {{ historyTotal }} 条 · 第 {{ historyPageNum }} / {{ historyPages || 1 }} 页</span>
+        <n-pagination
+          :page="historyPageNum"
+          :page-size="historyPageSize"
+          :item-count="historyTotal"
+          :page-sizes="[10, 20, 50, 100]"
+          show-size-picker
+          @update:page="onHistoryPageChange"
+          @update:page-size="onHistoryPageSizeChange"
+        />
+      </n-space>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="closeHistoryModal">关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -1256,5 +1466,23 @@ onMounted(async () => {
 
 .eye-btn:hover {
   background: #f2f3f5;
+}
+
+/* 签到历史日志模态框内的辅助样式 */
+.history-error {
+ color: #d03050;
+ padding: 8px 0;
+ text-align: center;
+}
+
+.history-empty {
+ color: #999;
+ padding: 24px 0;
+ text-align: center;
+}
+
+.history-summary {
+ color: #666;
+ font-size: 12px;
 }
 </style>
