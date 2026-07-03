@@ -89,13 +89,15 @@ public class DownstreamApiKeyService {
                 req.consumption(),
                 req.designatedAccountId(),
                 req.creditLimit(),
-                req.expiresAt());
+                req.expiresAt(),
+                normalizeSupportedModels(req.supportedModels()));
         // enabled 默认为 1
         if (req.enabled() != null && !req.enabled()) {
-            rec = new DownstreamApiKeyRecord(
-                    rec.id(), rec.label(), rec.apiKey(), rec.callCount(), rec.usedCredits(),
-                    rec.creditLimit(), rec.expiresAt(), 0, rec.consumption(),
-                    rec.designatedAccountId(), rec.createdAt(), rec.updatedAt());
+                rec = new DownstreamApiKeyRecord(
+                        rec.id(), rec.label(), rec.apiKey(), rec.callCount(), rec.usedCredits(),
+                        rec.creditLimit(), rec.expiresAt(), 0, rec.consumption(),
+                        rec.designatedAccountId(), rec.supportedModels(),
+                        rec.createdAt(), rec.updatedAt());
         }
         long newId = repository.insert(rec);
         DownstreamApiKeyRecord saved = repository.findById(newId).orElseThrow();
@@ -141,8 +143,17 @@ public class DownstreamApiKeyService {
         Long designatedAccountId = req.designatedAccountId() != null
                 ? req.designatedAccountId()
                 : existing.designatedAccountId();
+        // supportedModels 沿用 creditLimit/expiresAt 契约:
+        //   - req 字段为 null → 显式清空(写 SQL NULL,/v1/models 回退全集)
+        //   - req 字段为 [] → 严格不放行
+        //   - req 字段为 [...] → 覆盖白名单
+        //
+        // 为什么不区分"缺失"和"显式 null":本项目前端同仓库永远发完整 body,
+        // 不存在"旧客户端不传该字段"场景;record 字段缺省 = null 与显式 null 同义。
+        // 与 creditLimit/expiresAt 完全对称。
+        java.util.List<String> supportedModels = normalizeSupportedModels(req.supportedModels());
 
-        repository.update(id, label, creditLimit, expiresAt, enabled, consumption, designatedAccountId);
+        repository.update(id, label, creditLimit, expiresAt, enabled, consumption, designatedAccountId, supportedModels);
         DownstreamApiKeyRecord updated = repository.findById(id).orElseThrow();
         // 更新场景仍返回遮蔽 key(完整明文不返回)
         return DownstreamApiKeyItem.from(updated, false);
@@ -214,7 +225,8 @@ public class DownstreamApiKeyService {
                 existing.expiresAt(),
                 enabledInt,
                 existing.consumption(),
-                existing.designatedAccountId());
+                existing.designatedAccountId(),
+                existing.supportedModels());
         DownstreamApiKeyRecord updated = repository.findById(id)
                 .orElseThrow(() -> new IllegalStateException("更新后未找到记录: id=" + id));
         return DownstreamApiKeyItem.from(updated, true);
@@ -300,6 +312,32 @@ public class DownstreamApiKeyService {
             // 任何异常不外抛
             log.warn("recordChatUsage 异常 keyId={}: {}", keyId, e.getMessage());
         }
+    }
+
+    /**
+     * 规范化 supportedModels 入参
+     * <p>
+     * 行为:
+     * <ul>
+     *   <li>{@code null} → null(表示"未配置",落库时走 SQL NULL,/v1/models 回退全集)</li>
+     *   <li>空 list → 空 list(落库 "[]",/v1/models 严格不放行)</li>
+     *   <li>非空 list → 去空串 / trim / 去重(保插入顺序),返回不可变 List</li>
+     * </ul>
+     * 不抛异常(脏数据降级为"忽略该项")
+     */
+    private static java.util.List<String> normalizeSupportedModels(java.util.List<String> raw) {
+        if (raw == null) {
+            return null;
+        }
+        java.util.LinkedHashSet<String> dedup = new java.util.LinkedHashSet<>();
+        for (String s : raw) {
+            if (s == null) continue;
+            String t = s.trim();
+            if (!t.isEmpty()) {
+                dedup.add(t);
+            }
+        }
+        return java.util.List.copyOf(dedup);
     }
 
     /**

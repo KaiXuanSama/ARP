@@ -127,7 +127,6 @@ public class SettingsService {
 
     /**
      * 为 OpenAI Chat 路由按下游 API Key 解析目标账号(响应式包装)。
-     * <p>
      * <strong>这是 /v1/chat/completions 当前的权威入口</strong> —— 全局
      * {@code chat.consumption}
      * 设置已废弃,chat 路由改为按请求头 {@code Authorization: Bearer ak-...} 提取 key,
@@ -157,6 +156,41 @@ public class SettingsService {
     public Mono<ChatRoutingContext> resolveAccountForApiKey(String bearerToken) {
         return Mono.fromCallable(() -> resolveAccountForApiKeyBlocking(bearerToken))
                 .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    /**
+     * 只解析下游 API Key 记录(不选号、不计账、不抛"无效"以外的错误)
+     * <p>
+     * 用途:给 {@code /v1/models} 这类只读端点用 —— 拿到 key 之后只需要看 {@code supportedModels}
+     * 字段,不做消费也不需要选中账号。
+     * <p>
+     * 行为:
+     * <ul>
+     *   <li>bearerToken 为 null / 空 → 返回 null(调用方视为"匿名请求",回退全集)</li>
+     *   <li>key 不存在 / 格式错 → 返回 null(不抛 401 —— 只读端点没必要硬拒)</li>
+     *   <li>key 存在 → 返回记录(调用方根据 enabled / expiresAt 自行决定是否走白名单)</li>
+     * </ul>
+     * <p>
+     * 重要:对禁用过期的 key,本方法**也返回记录**(不视为匿名),由调用方决定如何处理。
+     * 当前 {@code OpenAiController.listModels} 对此一律走"白名单过滤" —— 即便该 key 不能用来 chat,
+     * 它的白名单仍然能影响"该调用方能看到哪些模型" —— 这与 chat 鉴权失败不返回模型列表的语义不同。
+     *
+     * @param bearerToken 请求头 Authorization 的值,形如 "Bearer ak-xxxxx";可为 null
+     * @return key 记录;null = 匿名或格式错
+     */
+    public Mono<DownstreamApiKeyRecord> resolveApiKeyRecord(String bearerToken) {
+        return Mono.fromCallable(() -> {
+            if (bearerToken == null || bearerToken.isBlank()) {
+                return null;
+            }
+            try {
+                String apiKey = extractApiKey(bearerToken);
+                return downstreamKeyRepository.findByApiKey(apiKey).orElse(null);
+            } catch (IllegalArgumentException e) {
+                // 格式错(null token 等) → 视为匿名,不抛
+                return null;
+            }
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     /**
@@ -224,7 +258,7 @@ public class SettingsService {
             default -> throw new IllegalArgumentException(
                     "key=" + keyRec.label() + " consumption 非法: " + mode);
         };
-        return new ChatRoutingContext(accountId, keyRec.id());
+        return new ChatRoutingContext(accountId, keyRec.id(), keyRec.supportedModels());
     }
 
     /**

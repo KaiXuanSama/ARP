@@ -1,6 +1,9 @@
 package com.kaixuan.agentreproxy.repository;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaixuan.agentreproxy.entity.DownstreamApiKeyRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -18,24 +21,68 @@ import java.util.List;
 @Repository
 public class DownstreamApiKeyJdbcRepository {
 
+        private static final Logger log = LoggerFactory.getLogger(DownstreamApiKeyJdbcRepository.class);
+
         private final JdbcTemplate jdbcTemplate;
+        private final ObjectMapper objectMapper;
+        /**
+         * RowMapper 改为实例级别(非 static),因为反序列化 supported_models 需要用到本实例持有的 ObjectMapper。
+         * <p>
+         * 早期版本用 static lambda + placeholder ObjectMapper,实现复杂且容易 NPE;改为实例 lambda 后
+         * 行为简单清晰 —— JdbcTemplate 内部每次 query 时会重新调用 lambda,代价可忽略。
+         */
+        private final RowMapper<DownstreamApiKeyRecord> rowMapper;
 
-        private static final RowMapper<DownstreamApiKeyRecord> ROW_MAPPER = (rs, rowNum) -> new DownstreamApiKeyRecord(
-                        rs.getLong("id"),
-                        rs.getString("label"),
-                        rs.getString("api_key"),
-                        rs.getLong("call_count"),
-                        rs.getObject("used_credits") == null ? null : rs.getDouble("used_credits"),
-                        rs.getObject("credit_limit") == null ? null : rs.getDouble("credit_limit"),
-                        rs.getObject("expires_at") == null ? null : rs.getLong("expires_at"),
-                        rs.getInt("enabled"),
-                        rs.getString("consumption"),
-                        rs.getObject("designated_account_id") == null ? null : rs.getLong("designated_account_id"),
-                        rs.getLong("created_at"),
-                        rs.getLong("updated_at"));
-
-        public DownstreamApiKeyJdbcRepository(JdbcTemplate jdbcTemplate) {
+        public DownstreamApiKeyJdbcRepository(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
                 this.jdbcTemplate = jdbcTemplate;
+                this.objectMapper = objectMapper;
+                this.rowMapper = (rs, rowNum) -> new DownstreamApiKeyRecord(
+                                rs.getLong("id"),
+                                rs.getString("label"),
+                                rs.getString("api_key"),
+                                rs.getLong("call_count"),
+                                rs.getObject("used_credits") == null ? null : rs.getDouble("used_credits"),
+                                rs.getObject("credit_limit") == null ? null : rs.getDouble("credit_limit"),
+                                rs.getObject("expires_at") == null ? null : rs.getLong("expires_at"),
+                                rs.getInt("enabled"),
+                                rs.getString("consumption"),
+                                rs.getObject("designated_account_id") == null ? null : rs.getLong("designated_account_id"),
+                                parseSupportedModels(rs.getString("supported_models")),
+                                rs.getLong("created_at"),
+                                rs.getLong("updated_at"));
+        }
+
+        /**
+         * 解析 supported_models 列的 JSON 字符串
+         * <p>
+         * - 字段为 NULL → 返回 null(回退到全集)
+         * - 字段为空字符串 → 返回 null(视为未配置,防御脏数据)
+         * - 字段为合法 JSON 数组 → 反序列化为 List
+         * - 字段为合法 JSON 但不是数组 → 记 warn,返回 null
+         * - 字段为非法 JSON → 记 warn,返回 null
+         */
+        private List<String> parseSupportedModels(String raw) {
+                if (raw == null || raw.isBlank()) {
+                        return null;
+                }
+                String trimmed = raw.trim();
+                try {
+                        Object parsed = objectMapper.readValue(trimmed, Object.class);
+                        if (parsed instanceof List<?> list) {
+                                java.util.List<String> out = new java.util.ArrayList<>(list.size());
+                                for (Object o : list) {
+                                        if (o != null) {
+                                                out.add(String.valueOf(o));
+                                        }
+                                }
+                                return List.copyOf(out);
+                        }
+                        log.warn("supported_models 不是数组类型,忽略 raw={}", trimmed);
+                        return null;
+                } catch (Exception e) {
+                        log.warn("supported_models 解析失败,忽略 raw={} err={}", trimmed, e.getMessage());
+                        return null;
+                }
         }
 
         public long insert(DownstreamApiKeyRecord rec) {
@@ -43,9 +90,9 @@ public class DownstreamApiKeyJdbcRepository {
                 jdbcTemplate.update(connection -> {
                         var ps = connection.prepareStatement(
                                         "INSERT INTO downstream_api_key (label, api_key, call_count, used_credits, " +
-                                                        "credit_limit, expires_at, enabled, consumption, designated_account_id) "
-                                                        +
-                                                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                                        "credit_limit, expires_at, enabled, consumption, designated_account_id, " +
+                                                        "supported_models) " +
+                                                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                         new String[] { "id" });
                         ps.setString(1, rec.label());
                         ps.setString(2, rec.apiKey());
@@ -65,6 +112,7 @@ public class DownstreamApiKeyJdbcRepository {
                                 ps.setNull(9, java.sql.Types.INTEGER);
                         else
                                 ps.setLong(9, rec.designatedAccountId());
+                        ps.setString(10, serializeSupportedModels(rec.supportedModels()));
                         return ps;
                 }, keyHolder);
                 Number key = keyHolder.getKey();
@@ -72,14 +120,17 @@ public class DownstreamApiKeyJdbcRepository {
         }
 
         public int update(Long id, String label, Double creditLimit, Long expiresAt,
-                        Integer enabled, String consumption, Long designatedAccountId) {
+                        Integer enabled, String consumption, Long designatedAccountId,
+                        List<String> supportedModels) {
                 // 注意:apiKey / callCount / usedCredits 不允许通过 update 改变(只能累加)
                 // creditLimit / expiresAt 是"可清空"字段(传 null = 写 SQL NULL),需要用 setNull
                 // 否则 JdbcTemplate 会因参数类型不匹配抛 InvalidDataAccessApiUsageException
+                // supportedModels 同 creditLimit/expiresAt 约定:null = 清空(回退全集),非 null = 覆盖
                 return jdbcTemplate.update(connection -> {
                         var ps = connection.prepareStatement(
                                         "UPDATE downstream_api_key SET label = ?, credit_limit = ?, expires_at = ?, " +
                                                         "enabled = ?, consumption = ?, designated_account_id = ?, " +
+                                                        "supported_models = ?, " +
                                                         "updated_at = (strftime('%s', 'now') * 1000) WHERE id = ?");
                         ps.setString(1, label);
                         if (creditLimit == null)
@@ -96,9 +147,29 @@ public class DownstreamApiKeyJdbcRepository {
                                 ps.setNull(6, java.sql.Types.INTEGER);
                         else
                                 ps.setLong(6, designatedAccountId);
-                        ps.setLong(7, id);
+                        ps.setString(7, serializeSupportedModels(supportedModels));
+                        ps.setLong(8, id);
                         return ps;
                 });
+        }
+
+        /**
+         * 把 supportedModels 列表序列化成 JSON 字符串,写到 SQL TEXT 列
+         * <p>
+         * - null → null(写到 SQL NULL)
+         * - 空列表 → "[]"(严格不放行,不是 null)
+         * - 非空 → JSON 数组
+         */
+        private String serializeSupportedModels(List<String> models) {
+                if (models == null) {
+                        return null;
+                }
+                try {
+                        return objectMapper.writeValueAsString(models);
+                } catch (Exception e) {
+                        log.warn("supported_models 序列化失败,落库为 null err={}", e.getMessage());
+                        return null;
+                }
         }
 
         public int deleteById(Long id) {
@@ -107,7 +178,7 @@ public class DownstreamApiKeyJdbcRepository {
 
         public java.util.Optional<DownstreamApiKeyRecord> findById(Long id) {
                 List<DownstreamApiKeyRecord> list = jdbcTemplate.query(
-                                "SELECT * FROM downstream_api_key WHERE id = ?", ROW_MAPPER, id);
+                                "SELECT * FROM downstream_api_key WHERE id = ?", rowMapper, id);
                 return list.stream().findFirst();
         }
 
@@ -116,7 +187,7 @@ public class DownstreamApiKeyJdbcRepository {
          */
         public java.util.Optional<DownstreamApiKeyRecord> findByApiKey(String apiKey) {
                 List<DownstreamApiKeyRecord> list = jdbcTemplate.query(
-                                "SELECT * FROM downstream_api_key WHERE api_key = ?", ROW_MAPPER, apiKey);
+                                "SELECT * FROM downstream_api_key WHERE api_key = ?", rowMapper, apiKey);
                 return list.stream().findFirst();
         }
 
@@ -196,7 +267,7 @@ public class DownstreamApiKeyJdbcRepository {
                 String direction = asc ? "ASC" : "DESC";
                 String sql = "SELECT * FROM downstream_api_key " +
                                 "ORDER BY " + orderBy + " " + direction + " LIMIT ? OFFSET ?";
-                return jdbcTemplate.query(sql, ROW_MAPPER, limit, offset);
+                return jdbcTemplate.query(sql, rowMapper, limit, offset);
         }
 
         /**

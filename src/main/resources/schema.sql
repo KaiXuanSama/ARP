@@ -112,6 +112,11 @@ CREATE TABLE IF NOT EXISTS downstream_api_key (
     enabled              INTEGER NOT NULL DEFAULT 1,
     consumption          TEXT    NOT NULL DEFAULT 'designated',
     designated_account_id INTEGER NULL,
+    -- 支持的模型列表(JSON 数组,仅存 model id)
+    --   - NULL = 不限制,/v1/models 回退到全集(默认行为,向后兼容老数据)
+    --   - []   = 严格不放行任何模型
+    --   - ["a","b"] = 只放行白名单内的模型
+    supported_models     TEXT    NULL,
     created_at           INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
     updated_at           INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
     FOREIGN KEY (designated_account_id) REFERENCES workbuddy_account(id) ON DELETE SET NULL

@@ -94,10 +94,32 @@ public class OpenAiController {
             return Flux.error(new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "messages 至少需要2 条(需包含 system消息)"));
         }
+        // 提取下游请求的 model —— 必须在 flatMapMany 之前拿到,用于白名单校验
+        String requestedModel = body.get("model") instanceof String m ? m.trim() : null;
         return settingsService.resolveAccountForApiKey(authorization)
                 .onErrorMap(IllegalArgumentException.class,
                         e -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, e.getMessage()))
                 .flatMapMany(ctx -> {
+                    // 模型白名单校验(2026-07 新增):
+                    //   - key.supportedModels == null  → 未配置,放行所有模型
+                    //   - key.supportedModels == []   → 严格不放行任何模型
+                    //   - key.supportedModels == [...] → 仅放行白名单内的 model id
+                    // 必须在调用 upstream 之前完成 —— 一旦发出请求就拦不住了
+                    if (requestedModel == null || requestedModel.isEmpty()) {
+                        // OpenAI 协议要求 model 必填;这里显式校验避免上游 400 转 500
+                        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                                "请求体缺少 model 字段");
+                    }
+                    if (ctx.supportedModels() != null) {
+                        if (ctx.supportedModels().isEmpty()) {
+                            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                                    "当前 API Key 不允许调用任何模型: " + requestedModel);
+                        }
+                        if (!ctx.supportedModels().contains(requestedModel)) {
+                            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                                    "当前 API Key 不支持模型: " + requestedModel);
+                        }
+                    }
                     // 鉴权通过,累加下游 key 的 call_count(失败不影响主流程,内部 catch)
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
@@ -180,7 +202,7 @@ public class OpenAiController {
      * {@code models-config.default.json}。改完配置重启服务生效。
      * <p>
      * 输出 shape 严格对齐 OpenAI：
-     * 
+     *
      * <pre>
      * { "object": "list", "data": [ { "id": "auto", "object": "model", "created": 1700000000,
      *                                  "owned_by": "virtual", "context_length": 172032 } ] }
@@ -193,16 +215,63 @@ public class OpenAiController {
      * <li>{@code context_length}← ModelConfig.contextLength</li>
      * <li>{@code created} ← 全列表共用同一锚点时间（OpenAI 官方也是 created_at 风格）</li>
      * </ul>
+     * <p>
+     * <strong>Per-key 模型白名单(2026-07 新增)</strong>:
+     * <ul>
+     *   <li>请求头 {@code Authorization: Bearer ak-xxxxx} 携带下游 API Key → 按 key 的
+     *       {@code supportedModels} 字段过滤全集</li>
+     *   <li>{@code supportedModels == null} → 不限制(回退全集)</li>
+     *   <li>{@code supportedModels == []} → 严格不放行,响应 data 为空数组</li>
+     *   <li>{@code supportedModels == ["a","b"]} → 交叉过滤;白名单里找不到的 model id 静默丢弃</li>
+     *   <li>未带 Authorization / Key 格式错 / Key 不存在 → 视为匿名,回退全集</li>
+     * </ul>
      */
     @GetMapping("/models")
-    public Mono<Map<String, Object>> listModels() {
-        List<Map<String, Object>> data = modelsConfig.getModels().stream()
+    public Mono<Map<String, Object>> listModels(
+            @RequestHeader(value = "Authorization", required = false) String authorization) {
+        return settingsService.resolveApiKeyRecord(authorization)
+                .map(this::filterModelsByApiKey)
+                .defaultIfEmpty(getAllModels())
+                .map(data -> {
+                    Map<String, Object> body = new LinkedHashMap<>();
+                    body.put("object", "list");
+                    body.put("data", data);
+                    return body;
+                });
+    }
+
+    /**
+     * 把 {@code /v1/models} 的全集按 API Key 白名单过滤
+     * <p>
+     * 调用方应保证 {@code keyRec != null};但这里仍做 null 防御,意外 null 走全集
+     */
+    private List<Map<String, Object>> filterModelsByApiKey(
+            com.kaixuan.agentreproxy.entity.DownstreamApiKeyRecord keyRec) {
+        if (keyRec == null) {
+            return getAllModels();
+        }
+        java.util.List<String> whitelist = keyRec.supportedModels();
+        // null → 不限制,回退全集
+        if (whitelist == null) {
+            return getAllModels();
+        }
+        // 空 → 严格不放行(空数组)
+        if (whitelist.isEmpty()) {
+            return List.of();
+        }
+        // 非空 → 交叉过滤;白名单里找不到的 model id(已删 / 改名)静默丢弃
+        java.util.Set<String> allowed = new java.util.HashSet<>(whitelist);
+        return modelsConfig.getModels().stream()
+                .filter(m -> allowed.contains(m.id()))
                 .map(OpenAiController::toOpenAiModelEntry)
                 .toList();
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("object", "list");
-        body.put("data", data);
-        return Mono.just(body);
+    }
+
+    /** 全模型列表(OpenAI 标准格式) */
+    private List<Map<String, Object>> getAllModels() {
+        return modelsConfig.getModels().stream()
+                .map(OpenAiController::toOpenAiModelEntry)
+                .toList();
     }
 
     private static Map<String, Object> toOpenAiModelEntry(ModelConfig m) {

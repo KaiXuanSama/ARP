@@ -35,10 +35,26 @@ import {
 } from 'naive-ui'
 import Icon from './Icon.vue'
 import { useAccountData } from '../composables/useAccountData'
+import { useModels } from '../composables/useModels'
 import type { CreditSnapshot } from '../utils/accountExtras'
 
 const message = useMessage()
 const accountStore = useAccountData()
+const { models: allModels, ensureModelsLoaded } = useModels()
+
+/**
+ * 模型下拉选项(全模型清单,过滤空 id 防御)
+ * <p>
+ * 来源:useModels store,管理面板拉到的是后端维护的全集
+ */
+const modelOptions = computed<SelectOption[]>(() =>
+  allModels.value
+    .filter((m) => m.id && m.id.trim() !== '')
+    .map((m) => ({
+      value: m.id,
+      label: m.family ? `${m.id} (${m.family})` : m.id,
+    })),
+)
 
 /**
  * 表单"指定账号"下拉选项
@@ -81,6 +97,16 @@ interface DownstreamKeyItem {
   enabled: boolean
   consumption: string
   designatedAccountId: number | null
+  /**
+   * 支持的模型 id 列表
+   * <ul>
+   *   <li>{@code null} / {@code undefined} —— 未配置(回退全集)</li>
+   *   <li>{@code []} —— 严格不放行</li>
+   *   <li>{@code ["a","b"]} —— 白名单</li>
+   * </ul>
+   * 列表 API 总是返回数组(可能为空),空数组 ≠ 未配置
+   */
+  supportedModels: string[] | null
   createdAt: number
   updatedAt: number
 }
@@ -114,6 +140,16 @@ const formDesignatedAccountId = ref<number | null>(null)
 const formCreditLimit = ref<number | null>(null)
 const formExpiresEnabled = ref(false)
 const formExpiresAt = ref<number | null>(null)
+/**
+ * 表单中的"支持的模型"白名单
+ * <p>
+ * 三态:null(回退全集)/ [](严格不放行)/ ["a","b"](白名单)
+ * <p>
+ * <strong>开关 enableSupportedModels=false</strong> 表示"未配置"(回退全集),此时
+ * formSupportedModels 即使有值也不发送到后端(后端收到 null = 沿用 existing)
+ */
+const enableSupportedModels = ref(false)
+const formSupportedModels = ref<string[]>([])
 const saving = ref(false)
 
 /** 创建完成后,展示完整明文 key 的"一次性"模态框 */
@@ -363,6 +399,29 @@ const columns = computed<DataTableColumns<DownstreamKeyItem>>(() => [
     },
   },
   {
+    title: '支持模型',
+    key: 'supportedModels',
+    width: 110,
+    render: (row: DownstreamKeyItem): VNode => {
+      // 三态渲染:
+      //   - null/undefined → 全集("全部" 灰色)
+      //   - []             → 严格不放行("不放行" 红色)
+      //   - ["a","b"]      → 数字 + tooltip 列出 id
+      if (row.supportedModels == null) {
+        return h(NTag, { size: 'small', type: 'default' }, () => '全部')
+      }
+      if (row.supportedModels.length === 0) {
+        return h(NTag, { size: 'small', type: 'error' }, () => '不放行')
+      }
+      const n = row.supportedModels.length
+      const text = `${n} 个`
+      return h('span', {
+        title: row.supportedModels.join('\n'),
+        style: { cursor: 'help', color: '#18a058' },
+      }, text)
+    },
+  },
+  {
     title: '指定账号',
     key: 'designatedAccountId',
     width: 130,
@@ -506,6 +565,8 @@ function resetForm(): void {
   formCreditLimit.value = null
   formExpiresEnabled.value = false
   formExpiresAt.value = null
+  enableSupportedModels.value = false
+  formSupportedModels.value = []
 }
 
 function openCreateModal(): void {
@@ -522,6 +583,17 @@ function openEditModal(row: DownstreamKeyItem): void {
   formCreditLimit.value = row.creditLimit
   formExpiresAt.value = row.expiresAt
   formExpiresEnabled.value = row.expiresAt != null
+  // 白名单三态映射:
+  //   - null/undefined → 未配置(开关关,空数组)
+  //   - []  → 严格不放行(开关开,空数组)
+  //   - ["a","b"] → 开关开,白名单
+  if (Array.isArray(row.supportedModels)) {
+    enableSupportedModels.value = true
+    formSupportedModels.value = [...row.supportedModels]
+  } else {
+    enableSupportedModels.value = false
+    formSupportedModels.value = []
+  }
   showFormModal.value = true
 }
 
@@ -542,6 +614,20 @@ async function saveForm(): Promise<void> {
       designatedAccountId: formConsumption.value === 'designated' ? formDesignatedAccountId.value : null,
       creditLimit: formCreditLimit.value,
       expiresAt: formExpiresEnabled.value ? formExpiresAt.value : null,
+      // 白名单三态映射(对齐后端 creditLimit/expiresAt 的 null=清空契约):
+      //   - enableSupportedModels=false → 显式传 null
+      //     后端:写 SQL NULL,/v1/models 回退全集(回退默认行为)
+      //   - enableSupportedModels=true + []      → 严格不放行(后端会写 "[]")
+      //   - enableSupportedModels=true + ["a",…] → 白名单覆盖
+      // 关键:必须显式传 null,不能 omit —— 后端约定 null = 清空,字段缺失也会
+      // 序列化成 null(JSON.stringify 不带字段 = 没有该 key),但显式 null 更稳妥,
+      // 也让"已关闭限制"这个意图在 wire 上可见
+      supportedModels: enableSupportedModels.value ? [...formSupportedModels.value] : null,
+    }
+    // 删除 undefined 字段(避免 "undefined" 字符串),null 保留 —— null 是合法
+    // "清空"信号,不是缺失
+    for (const k of Object.keys(body)) {
+      if (body[k] === undefined) delete body[k]
     }
     const url = editingId.value == null
       ? '/api/downstream-keys'
@@ -656,10 +742,11 @@ async function toggleEnabled(row: DownstreamKeyItem, newEnabled: boolean): Promi
 }
 
 onMounted(async () => {
-  // 列表数据 + 账号下拉选项 + 账号积分快照(显示用,可选)
+  // 列表数据 + 账号下拉选项 + 模型清单(后端全集,给"支持的模型"多选用)+ 账号积分快照
   await Promise.allSettled([
     loadList(),
     accountStore.ensureAccountsLoaded(),
+    ensureModelsLoaded(),
   ])
   // 积分快照拉取是后台异步,失败也不阻塞页面
   void accountStore.ensureExtrasLoaded()
@@ -739,7 +826,7 @@ onMounted(async () => {
         size="small"
         :row-key="(row: DownstreamKeyItem) => row.id"
         :pagination="false"
-        :scroll-x="1430"
+        :scroll-x="1540"
       />
       <div v-if="!loading && list.length === 0 && !loadError" class="empty-hint">
         暂无下游 API Key,点击右上角"新增下游 Key"开始
@@ -794,6 +881,26 @@ onMounted(async () => {
         <div>
           <div class="form-label">积分上限(留空 = 不限)</div>
           <n-input-number v-model:value="formCreditLimit" :min="0" :precision="1" placeholder="例如 100" style="width: 100%;" />
+        </div>
+
+        <div>
+          <div class="form-label">支持的模型</div>
+          <n-space align="center" :wrap="false">
+            <n-switch v-model:value="enableSupportedModels" />
+            <span style="font-size: 12px; color: #666;">
+              {{ enableSupportedModels ? '白名单模式(下方选中的模型才会在 /v1/models 中出现)' : '未配置(/v1/models 走全集)' }}
+            </span>
+          </n-space>
+          <n-select
+            v-if="enableSupportedModels"
+            v-model:value="formSupportedModels"
+            :options="modelOptions"
+            multiple
+            filterable
+            clearable
+            placeholder="不选 = 严格不放行(返回空模型列表)"
+            style="width: 100%; margin-top: 8px;"
+          />
         </div>
 
         <div>

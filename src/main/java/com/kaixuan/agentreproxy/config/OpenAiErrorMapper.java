@@ -37,6 +37,8 @@ import java.util.Map;
  *   <tr><td>未知的对话消耗方式</td><td>invalid_request_error</td><td>consumption_unknown</td><td>400</td></tr>
  *   <tr><td>当前仅支持...暂未实现</td><td>invalid_request_error</td><td>mode_not_implemented</td><td>400</td></tr>
  *   <tr><td>messages 至少需要</td><td>invalid_request_error</td><td>messages_too_few</td><td>400</td></tr>
+ *   <tr><td>缺少 model 字段</td><td>invalid_request_error</td><td>model_required</td><td>400</td></tr>
+ *   <tr><td>API Key 不允许调用任何模型 / 不支持模型</td><td>permission_error</td><td>model_not_allowed</td><td>400</td></tr>
  *   <tr><td>无法解析的/无 key 命中的</td><td>permission_error</td><td>no_eligible_account</td><td>400</td></tr>
  *   <tr><td>其他</td><td>invalid_request_error</td><td>invalid_request</td><td>400</td></tr>
  * </table>
@@ -91,6 +93,12 @@ public final class OpenAiErrorMapper {
         }
         if (m.contains("messages 至少需要")) {
             return new OpenAiErrorResponse(m, OpenAiErrorResponse.TYPE_INVALID_REQUEST, null, "messages_too_few");
+        }
+        if (m.contains("缺少 model 字段")) {
+            return new OpenAiErrorResponse(m, OpenAiErrorResponse.TYPE_INVALID_REQUEST, null, "model_required");
+        }
+        if (m.contains("当前 API Key 不允许调用任何模型") || m.contains("当前 API Key 不支持模型")) {
+            return new OpenAiErrorResponse(m, OpenAiErrorResponse.TYPE_PERMISSION, null, "model_not_allowed");
         }
         if (m.contains("没有可用的") || m.contains("可用的临期") || m.contains("可用的量少") || m.contains("可用的量大")) {
             return new OpenAiErrorResponse(m, OpenAiErrorResponse.TYPE_PERMISSION, null, "no_eligible_account");
