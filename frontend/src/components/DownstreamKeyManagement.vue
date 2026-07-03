@@ -191,8 +191,6 @@ const callLogOrderBy = ref('created_at')
 const callLogAsc = ref(false)
 const callLogLoading = ref(false)
 const callLogError = ref<string | null>(null)
-/** 展开查看 content 的行 id 集合 */
-const expandedCallLogIds = ref<Set<number>>(new Set())
 
 /**
  * 正在切换启用状态的 key id 集合
@@ -529,14 +527,14 @@ const callLogColumns = computed<DataTableColumns<CallLogItem>>(() => [
   {
     title: '时间',
     key: 'createdAt',
-    width: 150,
+    width: 120,
     sorter: 'default',
     render: (row: CallLogItem): VNode => h('span', { style: { fontSize: '12px' } }, formatTime(row.createdAt)),
   },
   {
     title: '账号',
     key: 'accountId',
-    width: 130,
+    width:80,
     render: (row: CallLogItem): VNode => {
       // null = 老数据(无法追溯当时命中的账号)或账号已删
       if (row.accountId == null) {
@@ -552,29 +550,72 @@ const callLogColumns = computed<DataTableColumns<CallLogItem>>(() => [
     },
   },
   {
-    title: 'chunk 内容(点击行展开)',
-    key: 'content',
-    render: (row: CallLogItem): VNode[] => {
-      const expanded = expandedCallLogIds.value.has(row.id)
-      const preview = row.content.length > 80
-        ? row.content.substring(0, 80) + '…'
-        : row.content
-      return [
-        h('code', {
-          style: {
-            fontSize: '12px',
-            fontFamily: "'SFMono-Regular', Consolas, monospace",
-            color: expanded ? '#333' : '#666',
-            whiteSpace: expanded ? 'pre-wrap' : 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            display: 'block',
-            maxWidth: '100%',
-            cursor: 'pointer',
-          },
-          onClick: () => toggleCallLogExpand(row.id),
-        }, expanded ? row.content : preview),
-      ]
+    title: '模型',
+    key: 'model',
+    width: 120,
+    render: (row: CallLogItem): VNode => {
+      // model 字段在 chunk JSON 顶层;parseUsageInfo 已经一并解析
+      // 解析失败 / 缺 model → 显示 "-"
+      const info = parseUsageInfo(row.content)
+      const model = info?.model
+      if (!model) {
+        return h('span', { style: { color: '#999', fontSize: '12px' } }, '-')
+      }
+      return h('span', {
+        style: {
+          fontSize: '12px',
+          fontFamily: "'SFMono-Regular', Consolas, monospace",
+          color: '#2080f0',
+        },
+        title: model,
+      }, model)
+    },
+  },
+  {
+    title: '关键信息',
+    key: 'usageSummary',
+    width: 360,
+    render: (row: CallLogItem): VNode => {
+      const info = parseUsageInfo(row.content)
+      // 全部为空(异常 chunk / 老格式) → 提示
+      if (!info) {
+        return h('span', { style: { color: '#999', fontSize: '12px' } }, '(无法解析 usage)')
+      }
+      const items: VNode[] = []
+      const push = (label: string, value: string | number, color?: string): void => {
+        items.push(
+          h('span', { style: { marginRight: '12px' } }, [
+            h('span', { style: { color: '#999' } }, `${label}: `),
+            h('span', { style: color ? { color, fontWeight: '500' } : {} }, String(value)),
+          ]),
+        )
+      }
+      // 输入 token
+      if (info.promptTokens != null) {
+        push('输入', info.promptTokens.toLocaleString())
+      }
+      // 输出 token
+      if (info.completionTokens != null) {
+        push('输出', info.completionTokens.toLocaleString())
+      }
+      // 缓存命中(数字 + 命中率,如果有 promptTokens 总数)
+      if (info.cacheHit != null) {
+        const hit = info.cacheHit.toLocaleString()
+        const total = info.promptTokens ?? 0
+        // 仅在 cacheHit <= total 时计算命中率,避免除零或负数显示异常
+        const rate = total > 0 && info.cacheHit <= total
+          ? ((info.cacheHit / total) * 100).toFixed(1) + '%'
+          : null
+        push('缓存命中', rate ? `${hit} (${rate})` : hit, '#18a058')
+      }
+      // 本次积分
+      if (info.credit != null) {
+        push('本次积分', info.credit.toFixed(4), '#d03050')
+      }
+      if (items.length === 0) {
+        return h('span', { style: { color: '#999', fontSize: '12px' } }, '(usage 为空)')
+      }
+      return h('div', { style: { fontSize: '12px', lineHeight: '1.6' } }, items)
     },
   },
 ])
@@ -607,6 +648,64 @@ function summarizeCredit(snap: CreditSnapshot | null | undefined): { remain: num
     size += p.cycleCapacitySize || 0
   }
   return { remain, size }
+}
+
+/**
+ * 解析 call_log.content(上游最终结算 chunk JSON)中的关键 usage 字段
+ * <p>
+ * 字段约定(对齐 OpenAI / CodeBuddy 实际返回):
+ * <ul>
+ *   <li>{@code usage.prompt_tokens} —— 输入 token 数</li>
+ *   <li>{@code usage.completion_tokens} —— 输出 token 数</li>
+ *   <li>{@code usage.prompt_cache_hit_tokens} —— 缓存命中 token 数(CodeBuddy 自定义)</li>
+ *   <li>{@code usage.credit} —— 本次消耗积分(CodeBuddy 自定义,浮点)</li>
+ * </ul>
+ * <p>
+ * 解析失败 / 缺 usage → 返回 null,UI 显示"(无法解析 usage)"
+ * 解析成功但 usage 字段全空 → 返回一个空对象(都是 null),UI 显示"(usage 为空)"
+ * <p>
+ * 性能:每个结算 chunk 调一次 JSON.parse,O(1) 不构成瓶颈
+ */
+interface UsageInfo {
+  promptTokens: number | null
+  completionTokens: number | null
+  cacheHit: number | null
+  credit: number | null
+  /** chunk 顶层的 model 字段(chat 请求里指定的模型 id);可能为 null = 老 chunk 格式 */
+  model: string | null
+}
+
+function parseUsageInfo(rawChunk: string): UsageInfo | null {
+  if (!rawChunk) return null
+  try {
+    const root = JSON.parse(rawChunk) as {
+      model?: unknown
+      usage?: Record<string, unknown> | null
+    }
+    if (!root || typeof root !== 'object') return null
+    const usage = root.usage
+    if (!usage || typeof usage !== 'object') return null
+    const num = (v: unknown): number | null => {
+      if (typeof v === 'number' && Number.isFinite(v)) return v
+      if (typeof v === 'string') {
+        const n = Number(v)
+        return Number.isFinite(n) ? n : null
+      }
+      return null
+    }
+    const model = typeof root.model === 'string' && root.model.trim() !== ''
+      ? root.model.trim()
+      : null
+    return {
+      promptTokens: num(usage.prompt_tokens),
+      completionTokens: num(usage.completion_tokens),
+      cacheHit: num(usage.prompt_cache_hit_tokens),
+      credit: num(usage.credit),
+      model,
+    }
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -785,7 +884,6 @@ function closeNewKeyModal(): void {
 function openCallLogModal(row: DownstreamKeyItem): void {
   callLogTarget.value = row
   callLogPageNum.value = 1
-  expandedCallLogIds.value = new Set()
   showCallLogModal.value = true
   void loadCallLogs()
 }
@@ -797,7 +895,6 @@ function closeCallLogModal(): void {
   showCallLogModal.value = false
   callLogList.value = []
   callLogError.value = null
-  expandedCallLogIds.value = new Set()
 }
 
 /**
@@ -853,16 +950,6 @@ function onCallLogSortChange(value: { orderBy: string, asc: boolean }): void {
   callLogAsc.value = value.asc
   callLogPageNum.value = 1
   void loadCallLogs()
-}
-
-function toggleCallLogExpand(id: number): void {
-  const next = new Set(expandedCallLogIds.value)
-  if (next.has(id)) {
-    next.delete(id)
-  } else {
-    next.add(id)
-  }
-  expandedCallLogIds.value = next
 }
 
 // ============== 删除 ==============
@@ -1218,7 +1305,7 @@ onMounted(async () => {
         :row-key="(row: CallLogItem) => row.id"
         :pagination="false"
         :max-height="420"
-        :scroll-x="970"
+        :scroll-x="880"
       />
       <div v-if="!callLogLoading && callLogList.length === 0 && !callLogError" class="empty-hint">
         该 Key 暂无调用日志
