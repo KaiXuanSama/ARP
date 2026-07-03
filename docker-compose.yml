@@ -7,16 +7,28 @@
 #       Spring 启动时一次性读入,运行时改文件需重启容器才生效——这与原 application.yml 行为一致)
 #   3. 备份数据:    整个 ./Config/ 目录就是你的所有持久化状态
 #
+# 查看编译过程(默认 Docker 会用进度条覆盖输出,加 --progress=plain 即可):
+#   docker compose build --progress=plain
+#   docker compose up -d --build --progress=plain
+# 看到 Maven 输出 / npm install / vite build 等所有阶段日志
+#
 # 端口: 主机 8351 -> 容器 8351
+# 编译期想看过程: docker compose build --progress=plain
+# tty: true 让 build 阶段的实时进度行不被 Docker 截断/覆盖
 
 services:
   app:
     build:
       context: .
       dockerfile: Dockerfile
+      # 想强制不走缓存,改 --no-cache;想看完整编译输出,在外面加 --progress=plain
+      # args:  # 如需 docker build 时注入 --build-arg,在此处声明
+      #   HTTP_PROXY: http://host.docker.internal:7890
     image: agentreproxy:latest
     container_name: agentreproxy
     restart: unless-stopped
+    tty: true
+    stdin_open: false
     ports:
       - "8351:8351"
     volumes:
