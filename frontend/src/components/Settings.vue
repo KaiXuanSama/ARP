@@ -1,16 +1,19 @@
 <script setup lang="ts">
 /**
- * 系统设置页面
+ * 定时签到设置页面
  * <p>
- * 当前只承载"定时签到"一项全局设置。设计为多设置块可扩展:
- * 每个 setting-block 是独立的一行(标题 + 控件),行间有分割线;卡片底部固定 Save 按钮靠右。
+ * 当前只承载"定时签到"一项全局设置,以独立卡片呈现:
+ *  - 卡片标题:定时签到
+ *  - 卡片描述:说明开启后的行为
+ *  - 卡片体:启用开关 + 时间选择器
+ *  - 卡片底部:独立的保存按钮
  * <p>
- * <strong>本期仅前端 UI</strong>:后端定时签到 API 暂未实现,Save 按钮按下时仅弹一个
- * 提示 toast("设置已保存到前端(后端 API 待对接)")。等后端 PUT /api/settings/...
- * 端点落地后,改 saveSettings() 里的 fetch 即可,UI 形态不动。
+ * <strong>已对接后端</strong>:
+ *  - 读取:GET /api/settings(列表,本页面 find 对应 key,便于未来扩展新配置项)
+ *  - 写入:PUT /api/settings/schedule.dailyCheckin(通用 KV 端点,
+ *    value 是 JSON 字符串 {"enabled":bool,"time":"HH:mm"})
  * <p>
- * 复用现有的 {@code app_settings} 表 + JSON 存储约定 —— 后续 key 形如 {@code schedule.dailyCheckin},
- * value JSON 形如 {@code {"enabled":true,"time":"08:00"}}。
+ * 复用现有的 {@code app_settings} 表 + JSON 存储约定。
  */
 import { computed, onMounted, ref } from 'vue'
 import { NSwitch, NTimePicker, NButton, NSpace, useMessage } from 'naive-ui'
@@ -39,19 +42,42 @@ const message = useMessage()
 /** 全局设置的 key —— 复用 app_settings 表 */
 const SCHEDULE_KEY = 'schedule.dailyCheckin'
 
-/** 从后端 GET 初始化默认值 —— 进入页面时调一次 */
+/** 后端 GET /api/settings 单条响应的 value 形态 */
+interface SettingValue {
+  enabled?: boolean
+  time?: string | null
+  [k: string]: unknown
+}
+/** 后端 GET /api/settings 列表响应的条目形态 */
+interface SettingListItem {
+  key: string
+  value: SettingValue
+  updatedAt?: number
+}
+
+/**
+ * 从后端拉全部设置,本页面只关心 {@link SCHEDULE_KEY} 一条
+ * <p>
+ * <strong>为什么用 list 而不是 GET 单条</strong>:未来新增设置项(主题 / 默认分页大小 等)时,
+ * 列表端点一次拉全,新增 UI 块直接消费本地缓存,无需为每个新项单独发请求。
+ * 当前只有一条配置,逻辑反而更简单 —— find 一下就拿到。
+ * <p>
+ * 响应壳为 {@code {data: [...]}} —— 后端 {@code SettingsController.list()} 统一返回。
+ */
 async function loadFromServer(): Promise<void> {
   try {
-    const res = await fetch(`/api/settings/${encodeURIComponent(SCHEDULE_KEY)}`)
-    if (res.status === 404) {
-      // 后端从未保存过 —— 合法情况,沿用 ref 初值
-      return
-    }
+    const res = await fetch('/api/settings')
     if (!res.ok) {
       throw new Error(`status=${res.status}`)
     }
-    const body = (await res.json().catch(() => ({}))) as { data?: { value?: { enabled?: boolean; time?: string | null } } }
-    const v = body.data?.value
+    const body = (await res.json().catch(() => ({}))) as { data?: SettingListItem[] }
+    const items = body.data ?? []
+    const item = items.find((it) => it.key === SCHEDULE_KEY)
+    if (!item) {
+      // 该 key 从未保存过 —— 合法情况,沿用 ref 初值
+      return
+    }
+    const v = item.value
     if (v && typeof v === 'object') {
       scheduleEnabled.value = v.enabled === true
       scheduleTimeMs.value = v.time ? hHmmStringToMs(v.time) : null
@@ -136,20 +162,16 @@ onMounted(async () => {
   <div class="settings">
     <div class="card">
       <div class="card-header">
-        <h3 class="card-title">系统设置</h3>
-        <p class="card-desc">全局设置项。当前仅开放"定时签到"。</p>
+        <h3 class="card-title">定时签到</h3>
+        <p class="card-desc">开启后服务会按设定的时间自动给所有账号签到。关闭则不会触发自动签到。</p>
       </div>
       <div class="card-body">
         <!--
           设置块(.setting-row):
             - 行:左控件 + 右提示(可选)
-            - 行间有 border-bottom 形成分割线(最后一行不加)
           后续如需新增"主题 / 默认分页大小"等,在 .setting-row 后追加即可;
           复制现有结构,无需改 card-body。
         -->
-        <div class="setting-block-heading">
-          <span class="setting-block-heading-text">设置定时签到功能</span>
-        </div>
         <div class="setting-row">
           <div class="setting-row-main">
             <n-switch v-model:value="scheduleEnabled" />
@@ -198,12 +220,11 @@ onMounted(async () => {
 }
 
 .card-header {
-  padding: 16px 20px;
-  border-bottom: 1px solid #ececf0;
+  padding: 14px 20px 0;
 }
 
 .card-title {
-  margin: 0 0 4px 0;
+  margin: 0 0 2px 0;
   font-size: 15px;
   font-weight: 600;
   color: #1f2329;
@@ -217,30 +238,23 @@ onMounted(async () => {
 }
 
 .card-body {
-  padding: 20px;
+  padding: 8px 20px 4px;
   display: flex;
   flex-direction: column;
-  /* gap:0 —— 行间分割线由 .setting-row 的 border-bottom 提供,避免双重间距 */
 }
 
 /*
  * 设置块样式 —— 每行一个设置项
  * - 左侧:控件 + 标签
  * - 右侧:辅助控件(如时间选择器)
- * - 行间分割线:border-bottom(最后一行不加,通过 :last-child 去掉)
+ * - 紧凑布局,无分割线
  */
 .setting-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 12px 0;
-  border-bottom: 1px solid #f0f0f0;
-}
-
-.setting-row:last-child {
-  /* 最后一个设置块不要分割线 */
-  border-bottom: none;
+  padding: 8px 0;
 }
 
 .setting-row-main {
@@ -257,27 +271,6 @@ onMounted(async () => {
   white-space: nowrap;
 }
 
-/*
- * 设置块小标题 —— 独立一行,位于该块设置项的上方,左对齐
- * - 比卡片大标题(15px)小一号,用 13px 黑色加粗
- * - 不画分割线(用户原话),与下方 .setting-row 用 12px 间距区分
- * - 命名沿用 "setting-block-heading" 区别于 "setting-row-label" —— 后者是"控件文字提示"
- */
-.setting-block-heading {
-  padding: 12px 0;
-  /*
-   * 不要 border-bottom —— 用户原话"不需要加横线",块标题与下面 setting-row
-   * 用间距区分(12px 上下),不重复画线
-   */
-}
-
-.setting-block-heading-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: #1f2329;
-  white-space: nowrap;
-}
-
 .setting-row-extra {
   flex-shrink: 0;
 }
@@ -286,13 +279,9 @@ onMounted(async () => {
  * 卡片底部 —— 固定 Save 按钮区域
  * - 始终在卡片底部
  * - Save 按钮靠右(用 n-space justify="end" 实现)
- * - dirty=false 时按钮禁用(避免无意义保存)
+ * - 无特殊背景/圆角/顶分割线,简洁融入卡片
  */
 .card-footer {
-  padding: 12px 20px;
-  border-top: 1px solid #ececf0;
-  background: #fafbfc;
-  border-bottom-left-radius: 8px;
-  border-bottom-right-radius: 8px;
+  padding: 8px 20px 12px;
 }
 </style>
