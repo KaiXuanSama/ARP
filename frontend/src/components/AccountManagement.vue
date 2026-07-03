@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onMounted, ref } from 'vue'
+import { computed, h, nextTick, onMounted, ref, type VNode } from 'vue'
 import {
  NButton,
  NCard,
@@ -443,6 +443,19 @@ const columns: DataTableColumns<AccountRow> = [
  key: 'updatedAt',
  width:180,
  render: (row: AccountRow) => formatTime(row.updatedAt),
+ },
+ {
+ title: '操作',
+ key: 'actions',
+ width: 70,
+ fixed: 'right',
+ render: (row: AccountRow): VNode => h(NButton, {
+ size: 'tiny',
+ quaternary: true,
+ type: 'error',
+ title: '删除账号(同步清理签到日志)',
+ onClick: () => openDeleteModal(row),
+ }, () => [h(Icon, { name: 'delete', size: 14 })]),
  },
 ]
 
@@ -956,6 +969,15 @@ const historyLoading = ref(false)
 const historyError = ref<string | null>(null)
 
 /**
+ * 删除确认模态框状态
+ * <p>
+ * 设计原则:删除是不可逆操作,必须明确展示目标账号标识(uid + 昵称) + 影响范围(签到日志级联清理)
+ */
+const showDeleteModal = ref(false)
+const deleteTarget = ref<AccountRow | null>(null)
+const deleting = ref(false)
+
+/**
  * 历史模态框分页列定义
  * <p>
  * id / 类型 / 签到时间(格式化) / 扩展信息(展开查看)
@@ -1005,6 +1027,56 @@ function closeHistoryModal(): void {
  showHistoryModal.value = false
  historyList.value = []
  historyError.value = null
+}
+
+/**
+ * 打开删除确认模态框
+ * <p>
+ * 入口:账号表格"操作"列的删除按钮
+ */
+function openDeleteModal(row: AccountRow): void {
+ deleteTarget.value = row
+ showDeleteModal.value = true
+}
+
+/**
+ * 取消删除
+ */
+function cancelDelete(): void {
+ showDeleteModal.value = false
+ deleteTarget.value = null
+}
+
+/**
+ * 确认删除 —— 调后端 DELETE /api/accounts/{id}
+ * <p>
+ * 行为:
+ * <ul>
+ *   <li>乐观更新:成功后立即从 store / localStorage 移除该账号,无需重新拉列表</li>
+ *   <li>失败:提示错误,保留表格行(用户可重试)</li>
+ *   <li>关联清理由后端 FK 处理(签到日志 CASCADE,下游 key SET NULL)</li>
+ * </ul>
+ */
+async function confirmDelete(): Promise<void> {
+ if (!deleteTarget.value) return
+ deleting.value = true
+ try {
+  const target = deleteTarget.value
+  const res = await fetch(`/api/accounts/${target.id}`, { method: 'DELETE' })
+  if (!res.ok) {
+   const errBody = await res.json().catch(() => ({}))
+   throw new Error(errBody?.message || `HTTP ${res.status}`)
+  }
+  // 乐观更新:从 store 立即移除
+  accountStore.removeLocalAccount(target.id)
+  message.success(`已删除账号 #${target.id} (${target.nickname || target.uid || ''})`)
+  cancelDelete()
+ } catch (e: unknown) {
+  const msg = e instanceof Error ? e.message : '未知错误'
+  message.error(`删除失败: ${msg}`)
+ } finally {
+  deleting.value = false
+ }
 }
 
 /**
@@ -1309,6 +1381,32 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
       <template #footer>
         <n-space justify="end">
           <n-button @click="closeHistoryModal">关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 删除账号确认模态框 -->
+    <n-modal
+      v-model:show="showDeleteModal"
+      preset="card"
+      :title="`删除账号 #${deleteTarget?.id ?? ''}`"
+      style="width: 460px;"
+    >
+      <n-space vertical size="medium">
+        <p>确定删除账号 <strong>{{ deleteTarget?.nickname || deleteTarget?.uid || `#${deleteTarget?.id}` }}</strong> 吗?</p>
+        <p style="color: #d03050; font-size: 12px; margin: 0;">
+          此操作不可恢复。删除后:
+        </p>
+        <ul style="color: #d03050; font-size: 12px; margin: 0; padding-left: 20px;">
+          <li>该账号的所有签到日志将被级联清理</li>
+          <li>指定了该账号的下游 Key 的"指定账号"字段会被置空(designated 模式下次调用将被业务校验拒绝)</li>
+          <li>本地缓存的积分 / 用量 / 签到快照将被清理</li>
+        </ul>
+      </n-space>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="cancelDelete">取消</n-button>
+          <n-button type="error" :loading="deleting" @click="confirmDelete">确认删除</n-button>
         </n-space>
       </template>
     </n-modal>

@@ -94,4 +94,23 @@ public class WorkbuddyAccountJdbcRepository {
                         "updated_at = (strftime('%s', 'now') * 1000) WHERE uid = ?",
                 extra, uid);
     }
+
+    /**
+     * 按主键 id 删除账户
+     * <p>
+     * 关联数据清理:
+     * <ul>
+     *   <li>{@code checkin_log.account_id} → FK {@code ON DELETE CASCADE},数据库自动删除所有签到日志</li>
+     *   <li>{@code downstream_api_key.designated_account_id} → FK {@code ON DELETE SET NULL},
+     *       key 保留,designated_account_id 变 null(designated 模式下次请求会被业务校验拒绝)</li>
+     * </ul>
+     * <p>
+     * 不在本方法里手动清签到日志 —— 留给 FK 处理,避免应用代码与数据库约束出现双源真相
+     *
+     * @return 受影响行数;0 = id 不存在
+     */
+    public int deleteById(Long id) {
+        if (id == null) return 0;
+        return jdbcTemplate.update("DELETE FROM workbuddy_account WHERE id = ?", id);
+    }
 }

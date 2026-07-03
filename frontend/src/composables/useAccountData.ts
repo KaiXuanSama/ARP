@@ -228,6 +228,55 @@ async function refreshOne(uid: string): Promise<void> {
   await fetchOneExtra(acct)
 }
 
+/**
+ * 乐观删除:从内存 ref + localStorage 立即移除指定 id 的账号
+ * <p>
+ * 调用方应先调后端 DELETE 接口,成功后再调本方法做 UI 立即反映;
+ * 如果后端失败,需要重新 {@link ensureAccountsLoaded} 刷回真相。
+ * <p>
+ * 同时清理该 uid 的 extras / checkin 快照,避免后续 view 里出现"账号已删但积分还在"
+ * 的孤儿数据
+ *
+ * @param id workbuddy_account.id 主键
+ */
+function removeLocalAccount(id: number): void {
+  const target = accounts.value.find((a) => a.id === id)
+  if (!target) {
+    // ref 里没有,直接 reload 一次 localStorage 防漂移
+    reloadAccountsFromStorage()
+    return
+  }
+  // 1) 更新内存 ref(响应式触发 view 重算)
+  accounts.value = accounts.value.filter((a) => a.id !== id)
+  // 2) 重写 localStorage
+  setCachedAccounts(accounts.value)
+  // 3) 清掉该 uid 的 extras / checkin 快照,避免出现孤儿数据
+  if (typeof window !== 'undefined' && target.uid) {
+    try {
+      const extrasRaw = localStorage.getItem('agentreproxy.account_extras')
+      if (extrasRaw) {
+        const map = JSON.parse(extrasRaw) as Record<string, unknown>
+        if (target.uid in map) {
+          delete map[target.uid]
+          localStorage.setItem('agentreproxy.account_extras', JSON.stringify(map))
+          extrasVersion.value += 1
+        }
+      }
+      const checkinRaw = localStorage.getItem('agentreproxy.account_checkin')
+      if (checkinRaw) {
+        const map = JSON.parse(checkinRaw) as Record<string, unknown>
+        if (target.uid in map) {
+          delete map[target.uid]
+          localStorage.setItem('agentreproxy.account_checkin', JSON.stringify(map))
+          checkinVersion.value += 1
+        }
+      }
+    } catch (e) {
+      console.warn('[accountData] 清理被删账号的快照失败:', e)
+    }
+  }
+}
+
 // ============== 后台异步:签到状态 ==============
 
 async function fetchCheckinStatus(): Promise<void> {
@@ -395,6 +444,9 @@ export function useAccountData() {
     // 主动刷新
     refreshOne,
     setLocalCheckin,
+
+    // 乐观删除(配合后端 DELETE,立即清本地缓存 + ref,后端失败需重新 ensureAccountsLoaded 刷回)
+    removeLocalAccount,
 
     // 跨 tab 监听管理(测试 / 卸载场景用)
     _installCrossTabListener: installCrossTabListener,

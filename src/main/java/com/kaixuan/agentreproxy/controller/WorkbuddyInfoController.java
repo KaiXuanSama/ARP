@@ -4,6 +4,7 @@ import com.kaixuan.agentreproxy.dto.AccountResponse;
 import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
 import com.kaixuan.agentreproxy.model.WorkbuddyDesktopInfo;
 import com.kaixuan.agentreproxy.repository.WorkbuddyAccountJdbcRepository;
+import com.kaixuan.agentreproxy.service.AccountDeleteService;
 import com.kaixuan.agentreproxy.service.AccountSaveService;
 import com.kaixuan.agentreproxy.service.AccountSaveService.SaveAction;
 import com.kaixuan.agentreproxy.service.WorkbuddyInfoService;
@@ -12,8 +13,10 @@ import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.multipart.FilePart;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -37,15 +40,18 @@ public class WorkbuddyInfoController {
 
     private final WorkbuddyInfoService workbuddyInfoService;
     private final AccountSaveService accountSaveService;
+    private final AccountDeleteService accountDeleteService;
     private final WorkbuddyAccountJdbcRepository accountRepository;
     private final ObjectMapper objectMapper;
 
     public WorkbuddyInfoController(WorkbuddyInfoService workbuddyInfoService,
                                    AccountSaveService accountSaveService,
+                                   AccountDeleteService accountDeleteService,
                                    WorkbuddyAccountJdbcRepository accountRepository,
                                    ObjectMapper objectMapper) {
         this.workbuddyInfoService = workbuddyInfoService;
         this.accountSaveService = accountSaveService;
+        this.accountDeleteService = accountDeleteService;
         this.accountRepository = accountRepository;
         this.objectMapper = objectMapper;
     }
@@ -127,6 +133,25 @@ public class WorkbuddyInfoController {
                 "status", result.action().name().toLowerCase(),
                 "data", result.response()
         ));
+    }
+
+    /**
+     * 按 id 删除账户
+     * <p>
+     * 关联清理(由 SQLite FK 自动处理):
+     * <ul>
+     *   <li>该账户的所有签到日志(checkin_log)→ CASCADE</li>
+     *   <li>所有指定该账户的下游 key(downstream_api_key.designated_account_id)→ SET NULL</li>
+     * </ul>
+     * <p>
+     * 响应壳:{@code {status: "ok", data: {deleted: true, id: 123}}}
+     */
+    @DeleteMapping("/accounts/{id}")
+    public Mono<Map<String, Object>> deleteAccount(@PathVariable Long id) {
+        return Mono.fromCallable(() -> {
+            accountDeleteService.deleteById(id);
+            return Map.<String, Object>of("data", Map.of("deleted", true, "id", id));
+        });
     }
 
     private static String sha256Short(String input) {
