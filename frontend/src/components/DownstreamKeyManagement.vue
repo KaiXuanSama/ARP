@@ -468,22 +468,32 @@ const columns = computed<DataTableColumns<DownstreamKeyItem>>(() => [
     key: 'designatedAccountId',
     width: 130,
     render: (row: DownstreamKeyItem): VNode => {
-      // 三种渲染路径:
-      // 1) designated 模式 → 从 accountStore 查昵称(没有就回退 #id)
-      // 2) least/most/expiring 模式 → 从 previewByMode 查预览结果(没拉到就回退 "-")
-      // 3) 其他(designatedAccountId 也为 null) → "-"
-      if (row.designatedAccountId != null) {
+      // 按 row.consumption 分支:
+      // - designated 模式 → 查 row.designatedAccountId 对应的账号
+      // - least/most/expiring 模式 → 查 previewByMode 中对应 mode 命中的账号
+      // 关键:不能直接看 designatedAccountId 是否非 null —— 该字段是数据库列,即便行已
+      // 切到 least/most/expiring 模式也可能有残留旧值,会让"非 designated 行"误显示
+      // 上一次 designated 模式选中的账号名,所以必须按 consumption 分流
+      if (row.consumption === 'designated') {
+        if (row.designatedAccountId == null) {
+          return h('span', { style: { color: '#999', fontSize: '12px' } }, '-')
+        }
         const acct = accountStore.view.find((v) => v.id === row.designatedAccountId)
-        const label = acct && acct.nickname && acct.nickname !== '未定义' ? acct.nickname : `#${row.designatedAccountId}`
+        const label = acct && acct.nickname && acct.nickname !== '未定义'
+          ? acct.nickname
+          : `#${row.designatedAccountId}`
         return h('span', { style: { fontSize: '12px' } }, label)
       }
+      // 非 designated 模式:查 previewByMode 中该 mode 命中的账号
       const hit = previewByMode.value.get(row.consumption)
-      if (hit) {
-        const acct = accountStore.view.find((v) => v.id === hit.accountId)
-        const label = acct && acct.nickname && acct.nickname !== '未定义' ? acct.nickname : hit.uid
-        return h('span', { style: { fontSize: '12px', color: '#18a058' } }, label)
+      if (!hit) {
+        return h('span', { style: { color: '#999', fontSize: '12px' } }, '-')
       }
-      return h('span', { style: { color: '#999', fontSize: '12px' } }, '-')
+      const acct = accountStore.view.find((v) => v.id === hit.accountId)
+      const label = acct && acct.nickname && acct.nickname !== '未定义'
+        ? acct.nickname
+        : hit.uid
+      return h('span', { style: { fontSize: '12px', color: '#18a058' } }, label)
     },
   },
   {
