@@ -119,6 +119,20 @@ interface PageResult<T> {
   pageSize: number
 }
 
+/**
+ * 调用日志条目(对应后端 {@code CallLogItem})
+ * <p>
+ * content 是上游 chat 响应的"最终结算 chunk"原始 JSON 字符串,
+ * CodeBuddy 字段随时变,前端按需 JSON.parse
+ */
+interface CallLogItem {
+  id: number
+  keyId: number | null
+  accountId: number | null
+  content: string
+  createdAt: number
+}
+
 // ============== 列表状态 ==============
 
 const list = ref<DownstreamKeyItem[]>([])
@@ -161,6 +175,24 @@ const copiedHint = ref(false)
 const showDeleteModal = ref(false)
 const deleteTarget = ref<DownstreamKeyItem | null>(null)
 const deleting = ref(false)
+
+/**
+ * 调用日志模态框状态
+ * <p>
+ * 入口:点击表格"调用次数"列;模态框独立分页 + 排序,与主列表解耦
+ */
+const showCallLogModal = ref(false)
+const callLogTarget = ref<DownstreamKeyItem | null>(null)
+const callLogList = ref<CallLogItem[]>([])
+const callLogTotal = ref(0)
+const callLogPageNum = ref(1)
+const callLogPageSize = ref(10)
+const callLogOrderBy = ref('created_at')
+const callLogAsc = ref(false)
+const callLogLoading = ref(false)
+const callLogError = ref<string | null>(null)
+/** 展开查看 content 的行 id 集合 */
+const expandedCallLogIds = ref<Set<number>>(new Set())
 
 /**
  * 正在切换启用状态的 key id 集合
@@ -363,7 +395,19 @@ const columns = computed<DataTableColumns<DownstreamKeyItem>>(() => [
       }, () => h(Icon, { name: 'copy', size: 14 })),
     ],
   },
-  { title: '调用次数', key: 'callCount', width: 100, sorter: true, render: (r) => r.callCount },
+  {
+    title: '调用次数',
+    key: 'callCount',
+    width: 100,
+    sorter: true,
+    render: (row: DownstreamKeyItem): VNode => h(NButton, {
+      size: 'tiny',
+      quaternary: true,
+      title: '点击查看调用日志',
+      style: { padding: '0 4px' },
+      onClick: () => openCallLogModal(row),
+    }, () => row.callCount),
+  },
   {
     title: '积分用量',
     key: 'creditUsage',
@@ -468,6 +512,70 @@ const columns = computed<DataTableColumns<DownstreamKeyItem>>(() => [
         onClick: () => openDeleteModal(row),
       }, () => [h(Icon, { name: 'delete', size: 14 }), ' 删除']),
     ],
+  },
+])
+
+// ============== 调用日志表格列 ==============
+
+/**
+ * 调用日志表格列定义
+ * <p>
+ * 4 列:编号 / 时间 / keyId / content(可点击展开)
+ * <p>
+ * content 是上游 chunk 原始 JSON 字符串,默认折叠显示截断版,点击行展开查看完整内容
+ */
+const callLogColumns = computed<DataTableColumns<CallLogItem>>(() => [
+  { title: '编号', key: 'id', width: 70 },
+  {
+    title: '时间',
+    key: 'createdAt',
+    width: 150,
+    sorter: 'default',
+    render: (row: CallLogItem): VNode => h('span', { style: { fontSize: '12px' } }, formatTime(row.createdAt)),
+  },
+  {
+    title: '账号',
+    key: 'accountId',
+    width: 130,
+    render: (row: CallLogItem): VNode => {
+      // null = 老数据(无法追溯当时命中的账号)或账号已删
+      if (row.accountId == null) {
+        return h('span', { style: { color: '#999' } }, '-')
+      }
+      // 从 accountStore.view 查昵称(同主列表"指定账号"列的解析方式)
+      // 没有就回退 #id,既保证可读也保留可点击追溯
+      const acct = accountStore.view.find((v) => v.id === row.accountId)
+      const label = acct && acct.nickname && acct.nickname !== '未定义'
+        ? acct.nickname
+        : `#${row.accountId}`
+      return h('span', { style: { fontSize: '12px' } }, label)
+    },
+  },
+  {
+    title: 'chunk 内容(点击行展开)',
+    key: 'content',
+    render: (row: CallLogItem): VNode[] => {
+      const expanded = expandedCallLogIds.value.has(row.id)
+      const preview = row.content.length > 80
+        ? row.content.substring(0, 80) + '…'
+        : row.content
+      return [
+        h('code', {
+          style: {
+            fontSize: '12px',
+            fontFamily: "'SFMono-Regular', Consolas, monospace",
+            color: expanded ? '#333' : '#666',
+            whiteSpace: expanded ? 'pre-wrap' : 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            display: 'block',
+            maxWidth: '100%',
+            cursor: 'pointer',
+          },
+          onClick: () => toggleCallLogExpand(row.id),
+        }, expanded ? row.content : preview),
+      ]
+    },
   },
 ])
 
@@ -665,6 +773,96 @@ async function saveForm(): Promise<void> {
 function closeNewKeyModal(): void {
   showNewKeyModal.value = false
   newlyCreatedKey.value = null
+}
+
+// ============== 调用日志 ==============
+
+/**
+ * 打开调用日志模态框
+ * <p>
+ * 入口:点击"调用次数"列的按钮;模态框内部独立分页
+ */
+function openCallLogModal(row: DownstreamKeyItem): void {
+  callLogTarget.value = row
+  callLogPageNum.value = 1
+  expandedCallLogIds.value = new Set()
+  showCallLogModal.value = true
+  void loadCallLogs()
+}
+
+/**
+ * 关闭调用日志模态框 —— 清空状态,避免下次打开时残留旧数据
+ */
+function closeCallLogModal(): void {
+  showCallLogModal.value = false
+  callLogList.value = []
+  callLogError.value = null
+  expandedCallLogIds.value = new Set()
+}
+
+/**
+ * 拉取一页调用日志
+ */
+async function loadCallLogs(): Promise<void> {
+  if (!callLogTarget.value) return
+  callLogLoading.value = true
+  callLogError.value = null
+  try {
+    const res = await fetch(
+      `/api/downstream-keys/${callLogTarget.value.id}/call-logs/page`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pageNum: callLogPageNum.value,
+          pageSize: callLogPageSize.value,
+          orderBy: callLogOrderBy.value,
+          asc: callLogAsc.value,
+        }),
+      },
+    )
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const body = await res.json()
+    const page: PageResult<CallLogItem> = body?.data
+    if (!page) throw new Error('响应格式异常:缺少 data 字段')
+    callLogList.value = Array.isArray(page.list) ? page.list : []
+    callLogTotal.value = Number(page.total ?? 0)
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    callLogError.value = `加载失败: ${msg}`
+    callLogList.value = []
+    callLogTotal.value = 0
+  } finally {
+    callLogLoading.value = false
+  }
+}
+
+function onCallLogPageChange(p: number): void {
+  callLogPageNum.value = p
+  void loadCallLogs()
+}
+
+function onCallLogPageSizeChange(s: number): void {
+  callLogPageSize.value = s
+  callLogPageNum.value = 1
+  void loadCallLogs()
+}
+
+function onCallLogSortChange(value: { orderBy: string, asc: boolean }): void {
+  callLogOrderBy.value = value.orderBy
+  callLogAsc.value = value.asc
+  callLogPageNum.value = 1
+  void loadCallLogs()
+}
+
+function toggleCallLogExpand(id: number): void {
+  const next = new Set(expandedCallLogIds.value)
+  if (next.has(id)) {
+    next.delete(id)
+  } else {
+    next.add(id)
+  }
+  expandedCallLogIds.value = next
 }
 
 // ============== 删除 ==============
@@ -978,6 +1176,69 @@ onMounted(async () => {
         <n-space justify="end">
           <n-button @click="showDeleteModal = false">取消</n-button>
           <n-button type="error" :loading="deleting" @click="confirmDelete">确认删除</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 调用日志模态框(点击"调用次数"列触发) -->
+    <n-modal
+      v-model:show="showCallLogModal"
+      preset="card"
+      :title="`调用日志 · Key #${callLogTarget?.id ?? ''} (${callLogTarget?.label ?? ''})`"
+      style="width: 980px;"
+      :on-after-leave="closeCallLogModal"
+    >
+      <!-- 排序工具栏 -->
+      <n-space align="center" size="small" style="margin-bottom: 8px;">
+        <span class="history-summary">排序：</span>
+        <n-button
+          size="tiny"
+          :type="callLogOrderBy === 'created_at' && !callLogAsc ? 'primary' : 'default'"
+          @click="onCallLogSortChange({ orderBy: 'created_at', asc: false })"
+        >时间倒序</n-button>
+        <n-button
+          size="tiny"
+          :type="callLogOrderBy === 'created_at' && callLogAsc ? 'primary' : 'default'"
+          @click="onCallLogSortChange({ orderBy: 'created_at', asc: true })"
+        >时间正序</n-button>
+        <n-button
+          size="tiny"
+          :type="callLogOrderBy === 'id' ? 'primary' : 'default'"
+          @click="onCallLogSortChange({ orderBy: 'id', asc: false })"
+        >按 ID</n-button>
+      </n-space>
+      <div v-if="callLogError" class="error-banner">{{ callLogError }}</div>
+      <n-data-table
+        :columns="callLogColumns"
+        :data="callLogList"
+        :loading="callLogLoading"
+        :bordered="false"
+        :single-line="false"
+        size="small"
+        :row-key="(row: CallLogItem) => row.id"
+        :pagination="false"
+        :max-height="420"
+        :scroll-x="970"
+      />
+      <div v-if="!callLogLoading && callLogList.length === 0 && !callLogError" class="empty-hint">
+        该 Key 暂无调用日志
+      </div>
+      <!-- 分页 -->
+      <div class="pagination-row" style="margin-top: 12px;">
+        <span class="summary">共 {{ callLogTotal }} 条 · 第 {{ callLogPageNum }} 页</span>
+        <n-pagination
+          :page="callLogPageNum"
+          :page-size="callLogPageSize"
+          :item-count="callLogTotal"
+          :page-sizes="[10, 20, 50, 100]"
+          show-size-picker
+          @update:page="onCallLogPageChange"
+          @update:page-size="onCallLogPageSizeChange"
+        />
+      </div>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="closeCallLogModal">关闭</n-button>
         </n-space>
       </template>
     </n-modal>

@@ -128,7 +128,7 @@ public class OpenAiController {
                             // 侧路拦截:每条 SSE 文本 element 都检查一次
                             // CodeBuddy 的"结算 chunk"在 [DONE] 之前带 usage 字段
                             // 透传原 element 给客户端,只做 side-effect 解析 + 落库
-                            .doOnNext(element -> interceptChatChunk(element, ctx.keyId()));
+                            .doOnNext(element -> interceptChatChunk(element, ctx.keyId(), ctx.accountId()));
                 });
     }
 
@@ -155,10 +155,11 @@ public class OpenAiController {
      *   <li>含 {@code "usage"} 字段 → 调 {@code recordChatUsage}</li>
      * </ol>
      *
-     * @param element 一条 SSE/NDJSON 文本(可能含多个 chunk + 末行 [DONE])
-     * @param keyId   下游 key 主键
+     * @param element   一条 SSE/NDJSON 文本(可能含多个 chunk + 末行 [DONE])
+     * @param keyId     下游 key 主键
+     * @param accountId 本次 chat 路由命中的上游账号主键(2026-07 新增,落 call_log.account_id)
      */
-    private void interceptChatChunk(String element, Long keyId) {
+    private void interceptChatChunk(String element, Long keyId, Long accountId) {
         if (element == null || element.isBlank()) {
             return;
         }
@@ -184,7 +185,7 @@ public class OpenAiController {
                 if (json.isEmpty() || "[DONE]".equals(json)) continue;
                 // 快速嗅探:有 "usage" 字段才走完整解析(避免每个 chunk 都做 JSON parse)
                 if (json.contains("\"usage\"")) {
-                    downstreamApiKeyService.recordChatUsage(keyId, json);
+                    downstreamApiKeyService.recordChatUsage(keyId, accountId, json);
                 }
             }
         } catch (Exception e) {

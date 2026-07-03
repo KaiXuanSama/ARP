@@ -199,6 +199,52 @@ public class DownstreamApiKeyService {
     }
 
     /**
+     * 按 key_id 分页查询调用日志
+     * <p>
+     * 设计要点:
+     * <ul>
+     *   <li>offset 分页(与 {@link #queryPage} 保持一致)</li>
+     *   <li>orderBy 白名单(id / created_at)—— 防 SQL 注入,其他值回退到 created_at</li>
+     *   <li>返回 {@link PageResult} 包总条数,前端可计算总页数</li>
+     * </ul>
+     * <p>
+     * 复用 {@link com.kaixuan.agentreproxy.dto.PageResult} 类型,与下游 key 列表分页同形,
+     * 前端可以用同一套分页组件(看 DownstreamKeyManagement.vue)
+     *
+     * @param keyId     下游 key 主键;null 视为无 key
+     * @param pageNum   1-based 页码;<1 视为 1
+     * @param pageSize  每页条数;clamp 到 [1, 100]
+     * @param orderBy   id | created_at;其他值回退到 created_at
+     * @param asc       升序 / 降序
+     */
+    public com.kaixuan.agentreproxy.dto.PageResult<com.kaixuan.agentreproxy.dto.CallLogItem> queryCallLogPage(
+            Long keyId, Integer pageNum, Integer pageSize, String orderBy, Boolean asc) {
+        if (keyId == null) {
+            return com.kaixuan.agentreproxy.dto.PageResult.of(0L, List.of(), 1, 10);
+        }
+        int pn = (pageNum == null || pageNum < 1) ? 1 : pageNum;
+        int ps = (pageSize == null || pageSize < 1) ? 10 : Math.min(pageSize, 100);
+        String ob = (orderBy == null || orderBy.isBlank()) ? "created_at" : orderBy.trim();
+        if (!ob.equals("id") && !ob.equals("created_at")) {
+            ob = "created_at";
+        }
+        boolean ascending = Boolean.TRUE.equals(asc);
+        int offset = (pn - 1) * ps;
+        long total = repository.countCallLogByKeyId(keyId);
+        java.util.List<java.util.Map<String, Object>> rows = repository.findCallLogPage(
+                keyId, ob, ascending, offset, ps);
+        java.util.List<com.kaixuan.agentreproxy.dto.CallLogItem> items = rows.stream()
+                .map(r -> new com.kaixuan.agentreproxy.dto.CallLogItem(
+                        r.get("id") == null ? null : ((Number) r.get("id")).longValue(),
+                        r.get("key_id") == null ? null : ((Number) r.get("key_id")).longValue(),
+                        r.get("account_id") == null ? null : ((Number) r.get("account_id")).longValue(),
+                        (String) r.get("content"),
+                        r.get("created_at") == null ? null : ((Number) r.get("created_at")).longValue()))
+                .toList();
+        return com.kaixuan.agentreproxy.dto.PageResult.of(total, items, pn, ps);
+    }
+
+    /**
      * 单独修改 enabled 字段
      * <p>
      * 复用 update() 方法,只把 enabled 改掉,其他字段保持原值
@@ -273,32 +319,33 @@ public class DownstreamApiKeyService {
      * <strong>做的事</strong>:
      * <ol>
      * <li>解析 JSON,提取 {@code usage.credit}(浮点;CodeBuddy 自定义,OpenAI 协议无)</li>
-     * <li>把整段 rawChunk 写入 {@code downstream_api_key_call_log}</li>
+     * <li>把整段 rawChunk 写入 {@code downstream_api_key_call_log}(含 key_id + account_id)</li>
      * <li>原子累加 {@code downstream_api_key.used_credits}</li>
      * </ol>
      * <p>
      * <strong>不抛异常</strong>:任何一步失败仅记 warn 日志,不影响主流程 chat 响应。
      * 理由:credit 是观测性数据,且 SSE 已经在透传给客户端,日志/累加失败不应回滚。
      *
-     * @param keyId    下游 key 主键
-     * @param rawChunk 整段 chunk JSON 文本(已剥 {@code data:} 前缀)
+     * @param keyId     下游 key 主键
+     * @param accountId 本次 chat 路由命中的上游账号主键;2026-07 起写入 call_log.account_id
+     * @param rawChunk  整段 chunk JSON 文本(已剥 {@code data:} 前缀)
      */
-    public void recordChatUsage(Long keyId, String rawChunk) {
+    public void recordChatUsage(Long keyId, Long accountId, String rawChunk) {
         if (keyId == null || rawChunk == null || rawChunk.isBlank()) {
             return;
         }
         try {
-            // 1) 写日志表(整段 chunk 文本)
-            long logId = repository.insertCallLog(rawChunk);
+            // 1) 写日志表(整段 chunk 文本 + key_id + account_id)
+            long logId = repository.insertCallLog(keyId, accountId, rawChunk);
             if (logId < 0) {
-                log.warn("调用日志插入失败 keyId={}", keyId);
+                log.warn("调用日志插入失败 keyId={} accountId={}", keyId, accountId);
                 return; // 写日志失败不继续累加,避免 credit 累加了但没日志可追溯
             }
             // 2) 解析 usage.credit
             double credit = parseCredit(rawChunk);
             if (credit <= 0D) {
                 // 没有 credit 字段(老 chunk 格式) 或为 0,只记日志不累加
-                log.debug("chat chunk 不含 usage.credit keyId={} logId={}", keyId, logId);
+                log.debug("chat chunk 不含 usage.credit keyId={} accountId={} logId={}", keyId, accountId, logId);
                 return;
             }
             // 3) 累加 used_credits
@@ -306,7 +353,7 @@ public class DownstreamApiKeyService {
             if (n == 0) {
                 log.warn("used_credits 累加失败,key 不存在 keyId={}", keyId);
             } else {
-                log.info("chat 落账:keyId={} credit={} logId={}", keyId, credit, logId);
+                log.info("chat 落账:keyId={} accountId={} credit={} logId={}", keyId, accountId, credit, logId);
             }
         } catch (Exception e) {
             // 任何异常不外抛

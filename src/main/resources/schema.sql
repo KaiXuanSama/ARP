@@ -130,24 +130,36 @@ CREATE INDEX IF NOT EXISTS idx_dstream_apikey_account   ON downstream_api_key(de
 --
 -- 用途:每次 /v1/chat/completions 调用,记录上游最终结算 chunk 的完整 JSON
 -- 设计原则:
---   - 三列结构:id / 完整 chunk JSON / 落库时间
---   - content 存原始字符串(便于回放 / 调试;CodeBuddy 字段随时变,JSON 反序列化
---     在写库时不做 —— 让查询端按需反序列化)
+--   - key_id FK ON DELETE SET NULL —— key 被删时,旧日志保留(审计场景),key_id 置 null
+--   - account_id FK ON DELETE SET NULL —— 账号被删时,旧日志保留,account_id 置 null
 --   - "完整 chunk" 指流结束前最后一个带 usage 字段的 data 块,见 OpenAiController
 --     的 SSE 拦截逻辑
---   - 不与 downstream_api_key 做 FK 关联(用户要求"三列简单结构",避免 JOIN 复杂度;
---     需要按 key 过滤日志时,可对 content 字段做 LIKE 模糊匹配或后续加 key_id 列)
---   - ON DELETE:key 被删时,旧日志保留(审计场景,无 FK CASCADE)
+--   - content 存原始字符串(便于回放 / 调试;CodeBuddy 字段随时变,JSON 反序列化
+--     在写库时不做 —— 让查询端按需反序列化)
+--   - "查询" 用例:管理面板的"查看调用日志"模态框按 key_id 过滤
+--   - 字段为后期新增(2026-07):key_id / account_id 列在老库上由
+--     SchemaMigrationConfig 追加;老数据这两列只能空着(没法兜底 —— 旧日志
+--     不知道当时命中的账号)
 --
 -- 字段说明:
 --   id:         自增编号
+--   key_id:     所属下游 key 的 id(对应 downstream_api_key.id);null = 审计孤儿日志
+--   account_id: 本次 chat 路由命中的上游账号 id(对应 workbuddy_account.id);
+--               null = 老数据(无法追溯当时命中的账号)或账号已删
 --   content:    上游最终结算 chunk 的原始 JSON 字符串(整段 data: 后面的内容)
 --   created_at: 落库时间(毫秒)
 
 CREATE TABLE IF NOT EXISTS downstream_api_key_call_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id      INTEGER NULL,
+    account_id  INTEGER NULL,
     content     TEXT    NOT NULL,
-    created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+    created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    FOREIGN KEY (key_id)      REFERENCES downstream_api_key(id) ON DELETE SET NULL,
+    FOREIGN KEY (account_id)  REFERENCES workbuddy_account(id) ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_dstream_call_log_created ON downstream_api_key_call_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_dstream_call_log_created   ON downstream_api_key_call_log(created_at);
+-- 以下索引由 SchemaMigrationConfig 在加列完成后创建,不放在这里(旧表无列会导致 CREATE INDEX 失败):
+--   idx_dstream_call_log_keyid ON downstream_api_key_call_log(key_id)
+--   idx_dstream_call_log_accountid ON downstream_api_key_call_log(account_id)

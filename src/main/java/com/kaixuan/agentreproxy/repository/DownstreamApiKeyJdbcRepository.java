@@ -239,18 +239,67 @@ public class DownstreamApiKeyJdbcRepository {
          * 三列结构:id / content(完整 chunk JSON 字符串)/ created_at
          * <p>
          * 返回新行 id(本期内不消费,但保留供后续"日志详情页"用)
+         * <p>
+         * <strong>keyId / accountId 必传</strong>:2026-07 起 call_log 增加这两列,
+         * 所有新写入必须带。旧数据的回填由 {@code SchemaMigrationConfig} 在启动时完成
+         * (key_id 统一指 1,account_id 不兜底,留 null)
          */
-        public long insertCallLog(String content) {
+        public long insertCallLog(Long keyId, Long accountId, String content) {
                 org.springframework.jdbc.support.GeneratedKeyHolder keyHolder = new org.springframework.jdbc.support.GeneratedKeyHolder();
                 jdbcTemplate.update(connection -> {
                         var ps = connection.prepareStatement(
-                                        "INSERT INTO downstream_api_key_call_log (content) VALUES (?)",
+                                        "INSERT INTO downstream_api_key_call_log (key_id, account_id, content) " +
+                                                        "VALUES (?, ?, ?)",
                                         new String[] { "id" });
-                        ps.setString(1, content);
+                        if (keyId == null) {
+                                ps.setNull(1, java.sql.Types.INTEGER);
+                        } else {
+                                ps.setLong(1, keyId);
+                        }
+                        if (accountId == null) {
+                                ps.setNull(2, java.sql.Types.INTEGER);
+                        } else {
+                                ps.setLong(2, accountId);
+                        }
+                        ps.setString(3, content);
                         return ps;
                 }, keyHolder);
                 Number key = keyHolder.getKey();
                 return key == null ? -1L : key.longValue();
+        }
+
+        /**
+         * 按 key_id 统计调用日志条数(分页用)
+         * <p>
+         * 包含 key_id = 0/负数的情况(旧数据回填到 id=1 时被自动修正),不会因 key 被删而丢失计数
+         */
+        public long countCallLogByKeyId(Long keyId) {
+                if (keyId == null) return 0L;
+                Long cnt = jdbcTemplate.queryForObject(
+                                "SELECT COUNT(*) FROM downstream_api_key_call_log WHERE key_id = ?",
+                                Long.class, keyId);
+                return cnt == null ? 0L : cnt;
+        }
+
+        /**
+         * 按 key_id 分页查询调用日志
+         * <p>
+         * orderBy 白名单:
+         * <ul>
+         *   <li>{@code id} —— 按主键</li>
+         *   <li>{@code created_at} —— 按时间</li>
+         * </ul>
+         * 调用方需自行白名单过滤(参考 {@code DownstreamApiKeyQueryRequest.safeOrderBy} 的做法)
+         */
+        public java.util.List<java.util.Map<String, Object>> findCallLogPage(
+                        Long keyId, String orderBy, boolean asc, int offset, int limit) {
+                if (keyId == null) return List.of();
+                String direction = asc ? "ASC" : "DESC";
+                String sql = "SELECT id, key_id, account_id, content, created_at " +
+                                "FROM downstream_api_key_call_log " +
+                                "WHERE key_id = ? " +
+                                "ORDER BY " + orderBy + " " + direction + " LIMIT ? OFFSET ?";
+                return jdbcTemplate.queryForList(sql, keyId, limit, offset);
         }
 
         /** 总数(分页用) */

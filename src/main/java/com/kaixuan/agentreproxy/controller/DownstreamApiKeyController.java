@@ -1,5 +1,6 @@
 package com.kaixuan.agentreproxy.controller;
 
+import com.kaixuan.agentreproxy.dto.CallLogItem;
 import com.kaixuan.agentreproxy.dto.DownstreamApiKeyItem;
 import com.kaixuan.agentreproxy.dto.DownstreamApiKeyQueryRequest;
 import com.kaixuan.agentreproxy.dto.DownstreamApiKeyRequest;
@@ -106,4 +107,39 @@ public class DownstreamApiKeyController {
      * 切换启用状态的轻量请求体 —— 只装 enabled 字段
      */
     public record ToggleEnabledRequest(boolean enabled) {}
+
+    /**
+     * 调用日志分页查询 —— 给管理面板"查看调用日志"模态框用
+     * <p>
+     * 端点:POST /api/downstream-keys/{id}/call-logs/page
+     * <p>
+     * 与 {@code POST /api/downstream-keys/page} 同构:
+     * <ul>
+     *   <li>请求体 {@code {pageNum, pageSize, orderBy, asc}}</li>
+     *   <li>响应 {@code {data: PageResult<CallLogItem>}}</li>
+     * </ul>
+     * 选 POST 而非 GET:与现有分页端点保持一致,避免 QueryString 编码 JSON 时的边界问题
+     */
+    @PostMapping("/{id}/call-logs/page")
+    public Mono<Map<String, Object>> callLogPage(
+            @PathVariable Long id,
+            @RequestBody(required = false) CallLogPageRequest req) {
+        CallLogPageRequest q = req == null ? new CallLogPageRequest(null, null, null, null) : req;
+        return Mono.fromCallable(() -> {
+            PageResult<CallLogItem> page = service.queryCallLogPage(
+                    id, q.pageNum(), q.pageSize(), q.orderBy(), q.asc());
+            return Map.<String, Object>of("data", page);
+        });
+    }
+
+    /**
+     * 调用日志分页查询请求体 —— 字段全可选,缺省走默认
+     */
+    public record CallLogPageRequest(
+            Integer pageNum,
+            Integer pageSize,
+            String orderBy,
+            Boolean asc
+    ) {
+    }
 }
