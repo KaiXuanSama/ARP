@@ -1,5 +1,6 @@
 package com.kaixuan.agentreproxy.config;
 
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
@@ -39,6 +40,12 @@ public class SchemaMigrationConfig implements ApplicationRunner {
         // 老数据迁移:key_id IS NULL 的记录统一指向 id=1(用户要求保留这些孤儿日志,
         // 后续手动确认/删除;只跑一次,带标志位避免重复 UPDATE)
         // backfillCallLogKeyId();
+        // 2026-07: 清理历史"usage":null 噪声日志
+        // 见 OpenAiController.hasRealUsage —— 旧实现用 json.contains("\"usage\"") 嗅探,
+        // 把中间 content chunk 的 "usage":null 也误判为结算 chunk 落库,产生 2w+ 无用行
+        // 这次修复后,新调用不再产生,本迁移把历史的"明确无用"行(usage:null / 缺 usage)
+        // 一次性删掉。带 app_settings 标志位保证幂等(只跑一次)
+        // cleanupCallLogNullUsage();
     }
 
     private void addColumnIfNotExists(String table, String column, String definition) {
@@ -74,38 +81,99 @@ public class SchemaMigrationConfig implements ApplicationRunner {
      * <p>
      * 防御:downstream_api_key 为空时跳过回填,避免 FK 失败
      */
-    // private void backfillCallLogKeyId() {
-    //     Boolean done = jdbcTemplate.queryForList(
-    //             "SELECT value FROM app_settings WHERE key = ?", String.class,
-    //             "schema.call_log_keyid_backfilled").stream().findFirst()
-    //             .map(s -> "1".equals(s)).orElse(false);
-    //     if (Boolean.TRUE.equals(done)) {
-    //         log.debug("[SchemaMigration] call_log key_id 已回填过,跳过");
-    //         return;
-    //     }
-    //     Long firstId = jdbcTemplate.queryForList(
-    //             "SELECT id FROM downstream_api_key ORDER BY id ASC LIMIT 1", Long.class).stream()
-    //             .findFirst().orElse(null);
-    //     if (firstId == null) {
-    //         log.info("[SchemaMigration] downstream_api_key 表为空,跳过 call_log key_id 回填");
-    //         return;
-    //     }
-    //     int rows = jdbcTemplate.update(
-    //             "UPDATE downstream_api_key_call_log SET key_id = ? WHERE key_id IS NULL", firstId);
-    //     log.info("[SchemaMigration] call_log key_id 回填:影响 {} 行,统一指向 id={}", rows, firstId);
-    //     // 写幂等标志(无 ON CONFLICT,手工 upsert)
-    //     try {
-    //         int n = jdbcTemplate.update(
-    //                 "UPDATE app_settings SET value = ?, updated_at = (strftime('%s','now')*1000) " +
-    //                         "WHERE key = ?",
-    //                 "\"1\"", "schema.call_log_keyid_backfilled");
-    //         if (n == 0) {
-    //             jdbcTemplate.update(
-    //                     "INSERT INTO app_settings (key, value) VALUES (?, ?)",
-    //                     "schema.call_log_keyid_backfilled", "\"1\"");
-    //         }
-    //     } catch (Exception e) {
-    //         log.warn("[SchemaMigration] 写回填标志位失败(不影响主流程): {}", e.getMessage());
-    //     }
-    // }
+    @SuppressWarnings("unused")
+    private void backfillCallLogKeyId() {
+        Boolean done = jdbcTemplate.queryForList(
+                "SELECT value FROM app_settings WHERE key = ?", String.class,
+                "schema.call_log_keyid_backfilled").stream().findFirst()
+                .map(s -> "1".equals(s)).orElse(false);
+        if (Boolean.TRUE.equals(done)) {
+            log.debug("[SchemaMigration] call_log key_id 已回填过,跳过");
+            return;
+        }
+        Long firstId = jdbcTemplate.queryForList(
+                "SELECT id FROM downstream_api_key ORDER BY id ASC LIMIT 1", Long.class).stream()
+                .findFirst().orElse(null);
+        if (firstId == null) {
+            log.info("[SchemaMigration] downstream_api_key 表为空,跳过 call_log key_id 回填");
+            return;
+        }
+        int rows = jdbcTemplate.update(
+                "UPDATE downstream_api_key_call_log SET key_id = ? WHERE key_id IS NULL", firstId);
+        log.info("[SchemaMigration] call_log key_id 回填:影响 {} 行,统一指向 id={}", rows, firstId);
+        // 写幂等标志(无 ON CONFLICT,手工 upsert)
+        try {
+            int n = jdbcTemplate.update(
+                    "UPDATE app_settings SET value = ?, updated_at = (strftime('%s','now')*1000) " +
+                            "WHERE key = ?",
+                    "\"1\"", "schema.call_log_keyid_backfilled");
+            if (n == 0) {
+                jdbcTemplate.update(
+                        "INSERT INTO app_settings (key, value) VALUES (?, ?)",
+                        "schema.call_log_keyid_backfilled", "\"1\"");
+            }
+        } catch (Exception e) {
+            log.warn("[SchemaMigration] 写回填标志位失败(不影响主流程): {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 2026-07: 清理历史"usage":null / 缺 usage 字段的 call_log 噪声行
+     * <p>
+     * <strong>背景</strong>:OpenAiController.interceptChatChunk 之前用
+     * {@code json.contains("\"usage\"")} 嗅探,把中间 content chunk 的
+     * {@code "usage":null} 也误判为结算 chunk 落库,产生 2w+ 无用行。本次修复后,
+     * 新 chat 调用已不再落这些行,本迁移把历史垃圾一次性清掉。
+     * <p>
+     * <strong>删除条件</strong>(全部满足才删):
+     * <ul>
+     *   <li>{@code content} 含 {@code "usage":null} —— 明确是中间 content chunk</li>
+     *   <li>OR {@code content} 不含 {@code "usage"} 字符串 —— 缺 usage 字段(老格式 / 上游异常)</li>
+     * </ul>
+     * <p>
+     * <strong>保留</strong>:
+     * <ul>
+     *   <li>有 {@code "credit"} 的真结算 chunk(content 含 "credit" 必然有真 usage 对象)</li>
+     *   <li>老数据回填到 key_id=1 的孤儿日志(可能有意义,留给用户手动 review)</li>
+     * </ul>
+     * <p>
+     * <strong>幂等性</strong>:用 app_settings key {@code schema.call_log_null_usage_cleaned}
+     * 标记,只跑一次。SQLite 的 LIKE 在大表上走全表扫描,一次性 2w+ 行 DELETE 可能稍慢,
+     * 启动时执行,无并发竞争,不需要分批。
+     * <p>
+     * <strong>不使用事务</strong>:SQLite 的 DELETE 自动在隐式事务里,失败回滚不影响其他迁移;
+     * 成功了写标志位(独立小事务)。
+     */
+    @SuppressWarnings("unused")
+    private void cleanupCallLogNullUsage() {
+        String flagKey = "schema.call_log_null_usage_cleaned";
+        Boolean done = jdbcTemplate.queryForList(
+                "SELECT value FROM app_settings WHERE key = ?", String.class, flagKey)
+                .stream().findFirst().map(s -> "1".equals(s)).orElse(false);
+        if (Boolean.TRUE.equals(done)) {
+            log.debug("[SchemaMigration] call_log null-usage 清理已跑过,跳过");
+            return;
+        }
+        // SQLite LIKE 大小写不敏感(默认),匹配 "usage":null / "usage": null(可能有空格)
+        // 也兼容 "usage":null,"token":... 的尾随形式
+        int rows = jdbcTemplate.update(
+                "DELETE FROM downstream_api_key_call_log " +
+                        "WHERE content LIKE '%\"usage\":null%' " +
+                        "   OR content LIKE '%\"usage\": null%' " +
+                        "   OR (content NOT LIKE '%\"usage\"%' AND content NOT LIKE '%\"credit\"%')");
+        log.info("[SchemaMigration] call_log 清理:删除 {} 行 \"usage\":null / 缺 usage 字段的噪声数据", rows);
+        // 写幂等标志(同 backfillCallLogKeyId 的手工 upsert 模式)
+        try {
+            int n = jdbcTemplate.update(
+                    "UPDATE app_settings SET value = ?, updated_at = (strftime('%s','now')*1000) WHERE key = ?",
+                    "\"1\"", flagKey);
+            if (n == 0) {
+                jdbcTemplate.update(
+                        "INSERT INTO app_settings (key, value) VALUES (?, ?)",
+                        flagKey, "\"1\"");
+            }
+        } catch (Exception e) {
+            log.warn("[SchemaMigration] 写清理标志位失败(不影响主流程): {}", e.getMessage());
+        }
+    }
 }

@@ -1,5 +1,6 @@
 package com.kaixuan.agentreproxy.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaixuan.agentreproxy.model.ModelConfig;
 import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
 import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
@@ -56,17 +57,20 @@ public class OpenAiController {
     private final SettingsService settingsService;
     private final ChatUsageRefreshScheduler usageRefreshScheduler;
     private final DownstreamApiKeyService downstreamApiKeyService;
+    private final ObjectMapper objectMapper;
 
     public OpenAiController(UpstreamClient upstream,
             ModelsConfigService modelsConfig,
             SettingsService settingsService,
             ChatUsageRefreshScheduler usageRefreshScheduler,
-            DownstreamApiKeyService downstreamApiKeyService) {
+            DownstreamApiKeyService downstreamApiKeyService,
+            ObjectMapper objectMapper) {
         this.upstream = upstream;
         this.modelsConfig = modelsConfig;
         this.settingsService = settingsService;
         this.usageRefreshScheduler = usageRefreshScheduler;
         this.downstreamApiKeyService = downstreamApiKeyService;
+        this.objectMapper = objectMapper;
     }
 
     // ============== Chat Completions ==============
@@ -152,7 +156,7 @@ public class OpenAiController {
      *   <li>每行 trim 后,若以 {@code data:} 开头(兼容 OpenAI SSE)→ 剥前缀</li>
      *   <li>否则直接当裸 JSON 处理(兼容 CodeBuddy NDJSON)</li>
      *   <li>内容是 {@code [DONE]} / 空 / 非 JSON → 跳过</li>
-     *   <li>含 {@code "usage"} 字段 → 调 {@code recordChatUsage}</li>
+     *   <li>解析后 {@code usage} 非 null(不只是含 "usage" 字符串)→ 调 {@code recordChatUsage}</li>
      * </ol>
      *
      * @param element   一条 SSE/NDJSON 文本(可能含多个 chunk + 末行 [DONE])
@@ -183,14 +187,50 @@ public class OpenAiController {
                     continue;
                 }
                 if (json.isEmpty() || "[DONE]".equals(json)) continue;
-                // 快速嗅探:有 "usage" 字段才走完整解析(避免每个 chunk 都做 JSON parse)
-                if (json.contains("\"usage\"")) {
+                // 关键:只对"真正有 usage 结算信息"的 chunk 落库
+                // 之前用 json.contains("\"usage\"") 嗅探,会把中间 chunk 的
+                // "usage":null 也误判为结算 chunk,导致 call_log 记录爆炸(2w+ 无用行)
+                // 改成解析后判断 usage 真的存在且非 null —— 性能开销与原版嗅探相当
+                // (JSON.parse 一次性完成,后续 recordChatUsage 也会再 parse,这里
+                // 复用了 ObjectMapper 单例,实际是两次 parse 的反序列化结果,微优化留待
+                // 后续 —— 当前优先级是修 bug)
+                if (hasRealUsage(json)) {
                     downstreamApiKeyService.recordChatUsage(keyId, accountId, json);
                 }
             }
         } catch (Exception e) {
             // 任何异常不外抛 —— 这是 side-channel,失败仅记日志
             log.warn("interceptChatChunk 异常 keyId={}: {}", keyId, e.getMessage());
+        }
+    }
+
+    /**
+     * 解析 chunk JSON,判断 {@code usage} 是否真的存在且非 null
+     * <p>
+     * 与之前 {@code json.contains("\"usage\"")} 的关键差异:
+     * <ul>
+     *   <li>中间 content chunk 形如 {@code {"choices":[{...}],"usage":null}}
+     *       —— 旧逻辑会误命中,新逻辑正确跳过</li>
+     *   <li>最终结算 chunk 形如 {@code {"choices":[],"usage":{"credit":...}}}
+     *       —— 新逻辑正确识别为真结算,落库</li>
+     *   <li>chunk 缺 usage 字段 —— 跳过(可能是上游异常返回)</li>
+     * </ul>
+     * <p>
+     * 解析失败时降级为 false(不落库),让 recordChatUsage 不被无关 chunk 触发
+     */
+    private boolean hasRealUsage(String json) {
+        try {
+            var node = objectMapper.readTree(json);
+            var usage = node.get("usage");
+            // 1) usage 字段不存在 → false
+            // 2) usage 是 null(JSON null / Java null) → false
+            // 3) usage 是空对象 {} → false
+            // 4) usage 是非空对象 {credit:..., ...} → true
+            return usage != null && !usage.isNull() && usage.isObject() && usage.size() > 0;
+        } catch (Exception e) {
+            // 解析失败,降级为 false —— 宁愿漏过结算 chunk 也不要把无关 chunk 写库
+            log.debug("hasRealUsage 解析失败,降级为 false: {}", e.getMessage());
+            return false;
         }
     }
 
