@@ -14,15 +14,16 @@ public final class UpstreamConstants {
     /** 请求超时（秒） */
     public static final int TIMEOUT_SECONDS = 60;
 
-    /** JWT 模式下的 Domain 头 */
+    /** JWT 模式下的 Domain头 */
     public static final String JWT_DOMAIN = "www.codebuddy.cn";
 
     // ============== 上游路径常量 ==============
-    // 重要：所有 Billing 端点路径都不带 /v2 前缀
-    //      （Antigravity 文档里都标了但容易遗漏，已通过抓包验证）
+    // 注意：Billing 各端点对 /v2 前缀的兼容性不一致。
+    // get-user-resource: /v2 路径同时支持 JWT 与 APIKey；旧路径仅 JWT 可用，APIKey 会401。
+    // get-user-request-usage: /v2 路径404；旧路径存在（JWT 可用），暂不切换。
 
-    /** 资源包列表 */
-    public static final String PATH_USER_RESOURCE = "/billing/meter/get-user-resource";
+    /**资源包列表 */
+    public static final String PATH_USER_RESOURCE = "/v2/billing/meter/get-user-resource";
     /** 时段用量明细（带 total） */
     public static final String PATH_USER_REQUEST_USAGE = "/billing/meter/get-user-request-usage";
     /** 每日签到（带 /v2 前缀） */
