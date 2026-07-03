@@ -3,7 +3,7 @@ spring:
     name: agentreproxy
   # SQLite 数据源（位于项目根目录）
   datasource:
-    url: ${SQLITE_URL:jdbc:sqlite:${user.dir}/agentreproxy.db?journal_mode=WAL&busy_timeout=5000}
+    url: ${SQLITE_URL:jdbc:sqlite:${user.dir}/agentreproxy.db}
     driver-class-name: org.sqlite.JDBC
     hikari:
       maximum-pool-size: 10
