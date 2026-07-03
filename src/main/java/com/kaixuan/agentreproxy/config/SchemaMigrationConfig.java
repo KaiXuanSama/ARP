@@ -27,6 +27,7 @@ public class SchemaMigrationConfig implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        addColumnIfNotExists("workbuddy_account", "enabled", "INTEGER NOT NULL DEFAULT '1'");
         addColumnIfNotExists("downstream_api_key", "supported_models", "TEXT NULL");
         // 2026-07: 给 downstream_api_key_call_log 加 key_id 列(指回 downstream_api_key.id)
         addColumnIfNotExists("downstream_api_key_call_log", "key_id", "INTEGER NULL");

@@ -12,11 +12,16 @@ public record WorkbuddyAccountRecord(
         String accountJson,
         String accessToken,
         String apiKey,
+        Integer enabled,
         String extra,
         Long createdAt,
         Long updatedAt
 ) {
     public static WorkbuddyAccountRecord ofNew(String uid, String accountJson, String accessToken, String apiKey) {
-        return new WorkbuddyAccountRecord(null, uid, accountJson, accessToken, apiKey, null, null, null);
+        return new WorkbuddyAccountRecord(null, uid, accountJson, accessToken, apiKey,1, null, null, null);
+    }
+
+    public boolean isEnabled() {
+        return enabled == null || enabled !=0;
     }
 }

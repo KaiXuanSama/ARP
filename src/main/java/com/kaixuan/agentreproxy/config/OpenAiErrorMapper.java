@@ -76,6 +76,9 @@ public final class OpenAiErrorMapper {
             return new OpenAiErrorResponse(m, OpenAiErrorResponse.TYPE_PERMISSION, null, "credit_limit_exceeded");
         }
         // 2) 业务配置链(400)
+        if (m.contains("指定账号已停用") || m.contains("账号已停用")) {
+        return new OpenAiErrorResponse(m, OpenAiErrorResponse.TYPE_PERMISSION, null, "account_disabled");
+        }
         if (m.contains("为指定模式") || m.contains("指定账号不存在")) {
             return new OpenAiErrorResponse(m, OpenAiErrorResponse.TYPE_PERMISSION, null, "designated_account_invalid");
         }

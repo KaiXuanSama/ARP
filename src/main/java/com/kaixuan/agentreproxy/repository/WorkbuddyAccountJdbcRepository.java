@@ -25,6 +25,7 @@ public class WorkbuddyAccountJdbcRepository {
             rs.getString("account_json"),
             rs.getString("access_token"),
             rs.getString("api_key"),
+            rs.getInt("enabled"),
             rs.getString("extra"),
             rs.getLong("created_at"),
             rs.getLong("updated_at")
@@ -36,7 +37,7 @@ public class WorkbuddyAccountJdbcRepository {
 
     public Optional<WorkbuddyAccountRecord> findByUid(String uid) {
         List<WorkbuddyAccountRecord> list = jdbcTemplate.query(
-                "SELECT id, uid, account_json, access_token, api_key, extra, created_at, updated_at " +
+                "SELECT id, uid, account_json, access_token, api_key, enabled, extra, created_at, updated_at " +
                         "FROM workbuddy_account WHERE uid = ?",
                 ROW_MAPPER, uid);
         return list.stream().findFirst();
@@ -48,7 +49,7 @@ public class WorkbuddyAccountJdbcRepository {
     public Optional<WorkbuddyAccountRecord> findById(Long id) {
         if (id == null) return Optional.empty();
         List<WorkbuddyAccountRecord> list = jdbcTemplate.query(
-                "SELECT id, uid, account_json, access_token, api_key, extra, created_at, updated_at " +
+                "SELECT id, uid, account_json, access_token, api_key, enabled, extra, created_at, updated_at " +
                         "FROM workbuddy_account WHERE id = ?",
                 ROW_MAPPER, id);
         return list.stream().findFirst();
@@ -60,14 +61,14 @@ public class WorkbuddyAccountJdbcRepository {
     public List<WorkbuddyAccountRecord> findAllByIds(List<Long> ids) {
         if (ids == null || ids.isEmpty()) return List.of();
         String placeholders = String.join(",", ids.stream().map(i -> "?").toList());
-        String sql = "SELECT id, uid, account_json, access_token, api_key, extra, created_at, updated_at " +
+        String sql = "SELECT id, uid, account_json, access_token, api_key, enabled, extra, created_at, updated_at " +
                 "FROM workbuddy_account WHERE id IN (" + placeholders + ") ORDER BY id ASC";
         return jdbcTemplate.query(sql, ROW_MAPPER, ids.toArray());
     }
 
     public List<WorkbuddyAccountRecord> findAll() {
         return jdbcTemplate.query(
-                "SELECT id, uid, account_json, access_token, api_key, extra, created_at, updated_at " +
+                "SELECT id, uid, account_json, access_token, api_key, enabled, extra, created_at, updated_at " +
                         "FROM workbuddy_account ORDER BY id ASC",
                 ROW_MAPPER);
     }
@@ -93,6 +94,14 @@ public class WorkbuddyAccountJdbcRepository {
                 "UPDATE workbuddy_account SET extra = ?, " +
                         "updated_at = (strftime('%s', 'now') * 1000) WHERE uid = ?",
                 extra, uid);
+    }
+
+    public int updateEnabled(Long id, boolean enabled) {
+        if (id == null) return 0;
+        return jdbcTemplate.update(
+                "UPDATE workbuddy_account SET enabled = ?, " +
+                        "updated_at = (strftime('%s', 'now') *1000) WHERE id = ?",
+                enabled ?1 :0, id);
     }
 
     /**

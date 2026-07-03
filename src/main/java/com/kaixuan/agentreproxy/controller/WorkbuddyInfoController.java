@@ -5,6 +5,7 @@ import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
 import com.kaixuan.agentreproxy.model.WorkbuddyDesktopInfo;
 import com.kaixuan.agentreproxy.repository.WorkbuddyAccountJdbcRepository;
 import com.kaixuan.agentreproxy.service.AccountDeleteService;
+import com.kaixuan.agentreproxy.service.AccountEnabledService;
 import com.kaixuan.agentreproxy.service.AccountSaveService;
 import com.kaixuan.agentreproxy.service.AccountSaveService.SaveAction;
 import com.kaixuan.agentreproxy.service.WorkbuddyInfoService;
@@ -16,6 +17,7 @@ import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -41,17 +43,20 @@ public class WorkbuddyInfoController {
     private final WorkbuddyInfoService workbuddyInfoService;
     private final AccountSaveService accountSaveService;
     private final AccountDeleteService accountDeleteService;
+    private final AccountEnabledService accountEnabledService;
     private final WorkbuddyAccountJdbcRepository accountRepository;
     private final ObjectMapper objectMapper;
 
     public WorkbuddyInfoController(WorkbuddyInfoService workbuddyInfoService,
                                    AccountSaveService accountSaveService,
                                    AccountDeleteService accountDeleteService,
+                                   AccountEnabledService accountEnabledService,
                                    WorkbuddyAccountJdbcRepository accountRepository,
                                    ObjectMapper objectMapper) {
         this.workbuddyInfoService = workbuddyInfoService;
         this.accountSaveService = accountSaveService;
         this.accountDeleteService = accountDeleteService;
+        this.accountEnabledService = accountEnabledService;
         this.accountRepository = accountRepository;
         this.objectMapper = objectMapper;
     }
@@ -151,6 +156,16 @@ public class WorkbuddyInfoController {
         return Mono.fromCallable(() -> {
             accountDeleteService.deleteById(id);
             return Map.<String, Object>of("data", Map.of("deleted", true, "id", id));
+        });
+    }
+
+    public record ToggleEnabledRequest(boolean enabled) {}
+
+    @PatchMapping("/accounts/{id}/enabled")
+    public Mono<Map<String, Object>> updateAccountEnabled(@PathVariable Long id, @RequestBody ToggleEnabledRequest request) {
+        return Mono.fromCallable(() -> {
+            WorkbuddyAccountRecord record = accountEnabledService.updateEnabled(id, request.enabled());
+            return Map.<String, Object>of("data", AccountResponse.of(record, "updated"));
         });
     }
 

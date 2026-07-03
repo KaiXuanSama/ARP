@@ -229,10 +229,15 @@ public class SettingsService {
                     throw new IllegalArgumentException(
                             "key=" + keyRec.label() + " 为指定模式,但未配置 designatedAccountId");
                 }
-                if (accountRepository.findById(designatedId).isEmpty()) {
+                WorkbuddyAccountRecord designated = accountRepository.findById(designatedId).orElse(null);
+                if (designated == null) {
                     throw new IllegalArgumentException(
                             "key=" + keyRec.label() + " 指定账号不存在: " + designatedId);
                 }
+                 if (!designated.isEnabled()) {
+                 throw new IllegalArgumentException(
+                 "key=" + keyRec.label() + " 指定账号已停用: " + designatedId);
+                 }
                 log.info("[chat] key={} (id={}) designated → accountId={}",
                         keyRec.label(), keyRec.id(), designatedId);
                 yield designatedId;
@@ -535,7 +540,7 @@ public class SettingsService {
     private java.util.Optional<ExpiringPackageCandidate> selectEarliestExpiringPackage() {
         List<ExpiringPackageCandidate> candidates = new ArrayList<>();
         for (WorkbuddyAccountRecord acc : accountRepository.findAll()) {
-            if (acc.id() == null || !hasUsableCredential(acc)) {
+            if (acc.id() == null || !acc.isEnabled() || !hasUsableCredential(acc)) {
                 continue;
             }
             candidates.addAll(readPositiveCreditPackages(acc));
@@ -563,7 +568,7 @@ public class SettingsService {
     private java.util.Optional<ExpiringPackageCandidate> selectAccountByTotalRemain(PackagePickMode mode) {
         List<ExpiringPackageCandidate> accountSummaries = new ArrayList<>();
         for (WorkbuddyAccountRecord acc : accountRepository.findAll()) {
-            if (acc.id() == null || !hasUsableCredential(acc)) {
+            if (acc.id() == null || !acc.isEnabled() || !hasUsableCredential(acc)) {
                 continue;
             }
             // 聚合:该账号所有"余量 > 0"包的 cycleCapacityRemain 之和

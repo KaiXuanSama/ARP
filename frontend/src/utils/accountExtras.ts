@@ -70,6 +70,7 @@ export interface CachedAccount {
   accountJson: string
   accessToken: string | null
   apiKey: string | null
+  enabled: boolean
   updatedAt: number
 }
 
@@ -107,7 +108,16 @@ function readCachedAccounts(): CachedAccount[] {
     if (!raw) return []
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
-    return parsed as CachedAccount[]
+    return (parsed as Array<Partial<CachedAccount>>).map((item) => ({
+      id: Number(item.id),
+      uid: String(item.uid ?? '-'),
+      nickname: String(item.nickname ?? extractNicknameFromJson(item.accountJson)),
+      accountJson: String(item.accountJson ?? ''),
+      accessToken: item.accessToken ?? null,
+      apiKey: item.apiKey ?? null,
+      enabled: item.enabled !== false,
+      updatedAt: Number(item.updatedAt ?? 0),
+    }))
   } catch {
     return []
   }
@@ -146,6 +156,7 @@ export function setCachedAccounts(
       accountJson: r.accountJson,
       accessToken: r.accessToken,
       apiKey: r.apiKey,
+      enabled: r.enabled !== false,
       updatedAt: r.updatedAt,
       nickname: r.nickname && r.nickname !== '未定义'
         ? r.nickname

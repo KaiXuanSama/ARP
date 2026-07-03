@@ -49,6 +49,7 @@ export interface AccountDataView {
   accountJson: string
   accessToken: string | null
   apiKey: string | null
+  enabled: boolean
   updatedAt: number
   credit: CreditSnapshot | null
   usage: UsageSnapshot | null
@@ -107,8 +108,10 @@ async function fetchAccountsFromServer(): Promise<void> {
       accountJson: it.accountJson ?? '',
       accessToken: it.accessToken || null,
       apiKey: it.apiKey || null,
+      enabled: it.enabled !== false,
       updatedAt: it.updatedAt,
     })))
+
     reloadAccountsFromStorage()
   } catch (e) {
     console.warn('[accountData] 拉取账号列表失败:', e)
@@ -226,6 +229,11 @@ async function refreshOne(uid: string): Promise<void> {
   const acct = accounts.value.find((a) => a.uid === uid)
   if (!acct) return
   await fetchOneExtra(acct)
+}
+
+function updateLocalAccountEnabled(id: number, enabled: boolean): void {
+ accounts.value = accounts.value.map((a) => (a.id === id ? { ...a, enabled } : a))
+ setCachedAccounts(accounts.value)
 }
 
 /**
@@ -367,6 +375,7 @@ function buildView(): AccountDataView[] {
     accountJson: a.accountJson,
     accessToken: a.accessToken,
     apiKey: a.apiKey,
+    enabled: a.enabled,
     updatedAt: a.updatedAt,
     credit: getCreditSnapshot(a.uid),
     usage: getUsageSnapshot(a.uid),
@@ -443,6 +452,7 @@ export function useAccountData() {
 
     // 主动刷新
     refreshOne,
+    updateLocalAccountEnabled,
     setLocalCheckin,
 
     // 乐观删除(配合后端 DELETE,立即清本地缓存 + ref,后端失败需重新 ensureAccountsLoaded 刷回)

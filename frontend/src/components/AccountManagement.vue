@@ -12,6 +12,7 @@ import {
   NPagination,
   NSpin,
   NSpace,
+   NSwitch,
   NUpload,
   useMessage,
   type DataTableColumns,
@@ -57,6 +58,7 @@ interface AccountRow {
   primaryCredential: string
   apiKey: string | null
   accessToken: string | null
+   enabled: boolean
   updatedAt: number
   credit?: CreditSnapshot
   usage?: UsageSnapshot
@@ -120,6 +122,7 @@ function openPackagesModal(row: AccountRow): void {
 
 const tableData = ref<AccountRow[]>([])
 const checkingIn = ref(false)
+const togglingEnabledIds = ref<Set<number>>(new Set())
 
 /**
  * 表格视图模式
@@ -364,6 +367,18 @@ const checkinButtonLabel = computed(() => checkingIn.value ? '签到进行中…
 
 const columns: DataTableColumns<AccountRow> = [
   { title: '编号', key: 'id', width: 70 },
+ {
+ title: '启用',
+ key: 'enabled',
+ width:60,
+ render: (row: AccountRow): VNode => h(NSwitch, {
+ value: row.enabled,
+ size: 'small',
+ loading: togglingEnabledIds.value.has(row.id),
+ disabled: togglingEnabledIds.value.has(row.id),
+ 'onUpdate:value': (v: boolean) => toggleAccountEnabled(row, v),
+ }),
+ },
   {
     title: '昵称',
     key: 'nickname',
@@ -584,6 +599,7 @@ function buildRows(): AccountRow[] {
     primaryCredential: pickPrimaryCredential(v.apiKey, v.accessToken),
     apiKey: v.accessToken ? null : v.apiKey,
     accessToken: v.accessToken,
+     enabled: v.enabled,
     updatedAt: v.updatedAt,
     credit: v.credit ?? undefined,
     usage: v.usage ?? undefined,
@@ -601,6 +617,39 @@ async function refreshExtras() {
   await accountStore.ensureExtrasLoaded()
   tableData.value = buildRows()
   message.success('积分、用量信息已刷新')
+}
+
+async function toggleAccountEnabled(row: AccountRow, newEnabled: boolean): Promise<void> {
+ const oldEnabled = row.enabled
+ row.enabled = newEnabled
+ togglingEnabledIds.value.add(row.id)
+ togglingEnabledIds.value = new Set(togglingEnabledIds.value)
+ try {
+ const res = await fetch(`/api/accounts/${row.id}/enabled`, {
+ method: 'PATCH',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ enabled: newEnabled }),
+ })
+ if (!res.ok) {
+ const errBody = await res.json().catch(() => ({}))
+ throw new Error(errBody?.message || `HTTP ${res.status}`)
+ }
+ const body = await res.json().catch(() => ({}))
+ const savedEnabled = body?.data?.enabled
+ if (typeof savedEnabled === 'boolean') {
+ row.enabled = savedEnabled
+ }
+ accountStore.updateLocalAccountEnabled(row.id, row.enabled)
+ message.success(`账号 #${row.id} 已${row.enabled ? '启用' : '停用'}`)
+ } catch (e: unknown) {
+ row.enabled = oldEnabled
+ accountStore.updateLocalAccountEnabled(row.id, oldEnabled)
+ const msg = e instanceof Error ? e.message : '未知错误'
+ message.error(`切换账号启用状态失败: ${msg}`)
+ } finally {
+ togglingEnabledIds.value.delete(row.id)
+ togglingEnabledIds.value = new Set(togglingEnabledIds.value)
+ }
 }
 
 function pickPrimaryCredential(apiKey?: string | null, accessToken?: string | null): string {
