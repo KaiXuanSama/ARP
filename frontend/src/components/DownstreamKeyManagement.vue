@@ -37,6 +37,7 @@ import Icon from './Icon.vue'
 import { useAccountData } from '../composables/useAccountData'
 import { useModels } from '../composables/useModels'
 import type { CreditSnapshot } from '../utils/accountExtras'
+import { authFetch } from '../utils/auth'
 
 const message = useMessage()
 const accountStore = useAccountData()
@@ -252,7 +253,7 @@ async function loadList(): Promise<void> {
   loading.value = true
   loadError.value = null
   try {
-    const res = await fetch('/api/downstream-keys/page', {
+    const res = await authFetch('/api/downstream-keys/page', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -306,7 +307,7 @@ async function refreshPreviewByMode(): Promise<void> {
     return
   }
   try {
-    const res = await fetch('/api/preview/chat-account-batch', {
+    const res = await authFetch('/api/preview/chat-account-batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ modes: Array.from(modesInTable) }),
@@ -849,7 +850,7 @@ async function saveForm(): Promise<void> {
     const url = editingId.value == null
       ? '/api/downstream-keys'
       : `/api/downstream-keys/${editingId.value}`
-    const res = await fetch(url, {
+    const res = await authFetch(url, {
       method: editingId.value == null ? 'POST' : 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -915,7 +916,7 @@ async function loadCallLogs(): Promise<void> {
   callLogLoading.value = true
   callLogError.value = null
   try {
-    const res = await fetch(
+    const res = await authFetch(
       `/api/downstream-keys/${callLogTarget.value.id}/call-logs/page`,
       {
         method: 'POST',
@@ -973,7 +974,7 @@ async function confirmDelete(): Promise<void> {
   if (!deleteTarget.value) return
   deleting.value = true
   try {
-    const res = await fetch(`/api/downstream-keys/${deleteTarget.value.id}`, { method: 'DELETE' })
+    const res = await authFetch(`/api/downstream-keys/${deleteTarget.value.id}`, { method: 'DELETE' })
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}))
       throw new Error(errBody?.message || `HTTP ${res.status}`)
@@ -1009,7 +1010,7 @@ async function toggleEnabled(row: DownstreamKeyItem, newEnabled: boolean): Promi
   togglingEnabledIds.value.add(id)
   togglingEnabledIds.value = new Set(togglingEnabledIds.value)
   try {
-    const res = await fetch(`/api/downstream-keys/${id}/enabled`, {
+    const res = await authFetch(`/api/downstream-keys/${id}/enabled`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: newEnabled }),

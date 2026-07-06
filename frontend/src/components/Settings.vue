@@ -1,22 +1,96 @@
 <script setup lang="ts">
 /**
- * 定时签到设置页面
+ * 系统设置页面
  * <p>
- * 当前只承载"定时签到"一项全局设置,以独立卡片呈现:
- *  - 卡片标题:定时签到
- *  - 卡片描述:说明开启后的行为
- *  - 卡片体:启用开关 + 时间选择器
- *  - 卡片底部:独立的保存按钮
+ * 设计原则：全局读取 + 局部保存
+ *  - 读取：GET /api/settings（一次拉全部设置项，前端按 key 分发到各卡片）
+ *  - 保存：各设置项走各自的专有端点（带强类型校验），互不干扰
  * <p>
- * <strong>已对接后端</strong>:
- *  - 读取:GET /api/settings(列表,本页面 find 对应 key,便于未来扩展新配置项)
- *  - 写入:PUT /api/settings/schedule.dailyCheckin(通用 KV 端点,
- *    value 是 JSON 字符串 {"enabled":bool,"time":"HH:mm"})
+ * 当前设置项：
+ *  - 账号管理：PUT /api/settings/admin/credential
+ *  - 定时签到：PUT /api/settings/schedule/daily-checkin
  * <p>
- * 复用现有的 {@code app_settings} 表 + JSON 存储约定。
+ * 未来新增设置项时，在本页面追加新卡片 + 新 ref + 新 save 函数即可，
+ * 每个卡片独立保存，不影响其他设置。
  */
 import { computed, onMounted, ref } from 'vue'
-import { NSwitch, NTimePicker, NButton, NSpace, useMessage } from 'naive-ui'
+import { NSwitch, NTimePicker, NButton, NSpace, NInput, useMessage } from 'naive-ui'
+import { authFetch } from '../utils/auth'
+
+const message = useMessage()
+
+// ===== 账号管理设置块 =====
+
+const ADMIN_KEY = 'admin.credential'
+
+/** 当前管理员用户名（从后端读取，展示用） */
+const currentUsername = ref('')
+/** 表单字段 */
+const newUsername = ref('')
+const newPassword = ref('')
+const confirmPassword = ref('')
+const oldPassword = ref('')
+/** 保存状态 */
+const savingAdmin = ref(false)
+
+/**
+ * Save 按钮 handler — PUT /api/settings/admin/credential（专有端点）
+ */
+async function saveAdminCredential(): Promise<void> {
+  if (savingAdmin.value) return
+
+  // 前置校验
+  if (!oldPassword.value) {
+    message.warning('请输入旧密码')
+    return
+  }
+  const hasNewUser = newUsername.value.trim().length > 0
+  const hasNewPwd = newPassword.value.length > 0
+  if (!hasNewUser && !hasNewPwd) {
+    message.warning('新用户名和新密码至少需要填写一项')
+    return
+  }
+  if (hasNewPwd && newPassword.value !== confirmPassword.value) {
+    message.warning('两次输入的新密码不一致')
+    return
+  }
+
+  savingAdmin.value = true
+  try {
+    const body: Record<string, string | null> = {
+      newUsername: hasNewUser ? newUsername.value.trim() : null,
+      newPassword: hasNewPwd ? newPassword.value : null,
+      confirmPassword: hasNewPwd ? confirmPassword.value : null,
+      oldPassword: oldPassword.value,
+    }
+    const res = await authFetch('/api/settings/admin/credential', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}))
+      throw new Error(errBody?.message || `请求失败: ${res.status}`)
+    }
+    const resBody = await res.json().catch(() => ({}))
+    // 更新显示的当前用户名
+    const updated = resBody?.data?.value
+    if (updated && typeof updated === 'object' && updated.username) {
+      currentUsername.value = updated.username
+    }
+    // 清空表单
+    newUsername.value = ''
+    newPassword.value = ''
+    confirmPassword.value = ''
+    oldPassword.value = ''
+    message.success('凭证已更新')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(`保存失败: ${msg}`)
+  } finally {
+    savingAdmin.value = false
+  }
+}
 
 // ===== 定时签到设置块 =====
 
@@ -37,7 +111,6 @@ const scheduleTimeError = computed<boolean>(
 
 /** Save 状态:false=未保存(默认值),true=已保存(用户点过 Save) */
 const saving = ref(false)
-const message = useMessage()
 
 /** 全局设置的 key —— 复用 app_settings 表 */
 const SCHEDULE_KEY = 'schedule.dailyCheckin'
@@ -66,18 +139,25 @@ interface SettingListItem {
  */
 async function loadFromServer(): Promise<void> {
   try {
-    const res = await fetch('/api/settings')
+    const res = await authFetch('/api/settings')
     if (!res.ok) {
       throw new Error(`status=${res.status}`)
     }
     const body = (await res.json().catch(() => ({}))) as { data?: SettingListItem[] }
     const items = body.data ?? []
-    const item = items.find((it) => it.key === SCHEDULE_KEY)
-    if (!item) {
-      // 该 key 从未保存过 —— 合法情况,沿用 ref 初值
+
+    // 账号管理卡片：读取当前用户名
+    const adminItem = items.find((it) => it.key === ADMIN_KEY)
+    if (adminItem && adminItem.value && typeof adminItem.value === 'object') {
+      currentUsername.value = (adminItem.value as Record<string, unknown>).username as string ?? ''
+    }
+
+    // 定时签到卡片
+    const scheduleItem = items.find((it) => it.key === SCHEDULE_KEY)
+    if (!scheduleItem) {
       return
     }
-    const v = item.value
+    const v = scheduleItem.value
     if (v && typeof v === 'object') {
       scheduleEnabled.value = v.enabled === true
       scheduleTimeMs.value = v.time ? hHmmStringToMs(v.time) : null
@@ -88,9 +168,12 @@ async function loadFromServer(): Promise<void> {
 }
 
 /**
- * Save 按钮 handler —— PUT /api/settings/schedule.dailyCheckin
+ * Save 按钮 handler — PUT /api/settings/schedule/daily-checkin（专有端点）
  * <p>
- * 后端通用端点:不限定 key,任意 JSON 入库。响应跟 GET 一致,回包带最新 updatedAt。
+ * 读取仍走全局 GET /api/settings（一次拉全部），但保存走专有端点：
+ * - 后端强类型 DTO + 业务校验（enabled=true 时 time 必填且格式正确）
+ * - 路径更具体，语义更清晰
+ * - 未来新增设置项（主题 / 默认分页大小等），各自走独立端点保存，互不干扰
  */
 async function saveSettings(): Promise<void> {
   if (saving.value) return
@@ -106,7 +189,7 @@ async function saveSettings(): Promise<void> {
       enabled: scheduleEnabled.value,
       time,
     }
-    const res = await fetch(`/api/settings/${encodeURIComponent(SCHEDULE_KEY)}`, {
+    const res = await authFetch('/api/settings/schedule/daily-checkin', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -160,6 +243,77 @@ onMounted(async () => {
 
 <template>
   <div class="settings">
+    <!-- ========== 账号管理卡片 ========== -->
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">账号管理</h3>
+        <p class="card-desc">
+          修改管理面板的登录凭证。当前用户名：<strong>{{ currentUsername || '—' }}</strong>
+        </p>
+      </div>
+      <div class="card-body">
+        <div class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">新用户名</span>
+          <div class="setting-row-input">
+            <n-input
+              v-model:value="newUsername"
+              placeholder="不填则不修改"
+              clearable
+            />
+          </div>
+        </div>
+        <div class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">新密码</span>
+          <div class="setting-row-input">
+            <n-input
+              v-model:value="newPassword"
+              type="password"
+              show-password-on="click"
+              placeholder="不填则不修改"
+              clearable
+            />
+          </div>
+        </div>
+        <div class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">确认新密码</span>
+          <div class="setting-row-input">
+            <n-input
+              v-model:value="confirmPassword"
+              type="password"
+              show-password-on="click"
+              placeholder="再次输入新密码"
+              :disabled="!newPassword"
+              clearable
+            />
+          </div>
+        </div>
+        <div class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">验证旧密码</span>
+          <div class="setting-row-input">
+            <n-input
+              v-model:value="oldPassword"
+              type="password"
+              show-password-on="click"
+              placeholder="必填，验证当前密码"
+              clearable
+            />
+          </div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <n-space justify="end">
+          <n-button
+            type="primary"
+            :loading="savingAdmin"
+            @click="saveAdminCredential"
+          >
+            保存
+          </n-button>
+        </n-space>
+      </div>
+    </div>
+
+    <!-- ========== 定时签到卡片 ========== -->
     <div class="card">
       <div class="card-header">
         <h3 class="card-title">定时签到</h3>
@@ -273,6 +427,20 @@ onMounted(async () => {
 
 .setting-row-extra {
   flex-shrink: 0;
+}
+
+/*
+ * 账号管理卡片 —— 标签固定宽度 + 输入框自适应撑满
+ */
+.setting-row-label-fixed {
+  width: 90px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.setting-row-input {
+  flex: 1;
+  min-width: 0;
 }
 
 /*

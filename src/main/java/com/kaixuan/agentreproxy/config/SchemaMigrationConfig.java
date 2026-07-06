@@ -1,6 +1,7 @@
 package com.kaixuan.agentreproxy.config;
 
 
+import com.kaixuan.agentreproxy.service.SettingsService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
@@ -9,10 +10,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * 数据库 Schema 迁移 — 在应用启动时自动执行增量迁移。
+ * 数据库 Schema 迁移 + 数据初始化 — 在应用启动时自动执行。
  * <p>
- * SQLite 的 ALTER TABLE ADD COLUMN 不支持 IF NOT EXISTS，
- * 因此通过 PRAGMA table_info 检查列是否存在后再执行。
+ * 职责：
+ * <ul>
+ *   <li>增量 ALTER TABLE ADD COLUMN（SQLite 不支持 IF NOT EXISTS）</li>
+ *   <li>增量 CREATE INDEX</li>
+ *   <li>初始化默认管理员凭证（admin.credential 不存在时创建 root/root）</li>
+ * </ul>
  */
 @Component
 public class SchemaMigrationConfig implements ApplicationRunner {
@@ -20,9 +25,11 @@ public class SchemaMigrationConfig implements ApplicationRunner {
     private static final Logger log = LoggerFactory.getLogger(SchemaMigrationConfig.class);
 
     private final JdbcTemplate jdbcTemplate;
+    private final SettingsService settingsService;
 
-    public SchemaMigrationConfig(JdbcTemplate jdbcTemplate) {
+    public SchemaMigrationConfig(JdbcTemplate jdbcTemplate, SettingsService settingsService) {
         this.jdbcTemplate = jdbcTemplate;
+        this.settingsService = settingsService;
     }
 
     @Override
@@ -47,6 +54,10 @@ public class SchemaMigrationConfig implements ApplicationRunner {
         // 这次修复后,新调用不再产生,本迁移把历史的"明确无用"行(usage:null / 缺 usage)
         // 一次性删掉。带 app_settings 标志位保证幂等(只跑一次)
         // cleanupCallLogNullUsage();
+
+        // ============== 数据初始化 ==============
+        // 管理员凭证：不存在则创建默认 root/root
+        settingsService.ensureDefaultAdminCredential();
     }
 
     private void addColumnIfNotExists(String table, String column, String definition) {

@@ -33,6 +33,7 @@ import {
   type UsageSnapshot,
   type CheckinSnapshot,
 } from '../utils/accountExtras'
+import { authFetch } from '../utils/auth'
 
 // ============== 类型 ==============
 
@@ -98,7 +99,7 @@ let checkinLoadInFlight: Promise<void> | null = null
  */
 async function fetchAccountsFromServer(): Promise<void> {
   try {
-    const res = await fetch('/api/accounts')
+    const res = await authFetch('/api/accounts')
     if (!res.ok) throw new Error(`status=${res.status}`)
     const body = await res.json()
     const rawList: any[] = body.data || []
@@ -151,7 +152,7 @@ async function fetchOneExtra(acct: CachedAccount): Promise<void> {
   const usageUrl = `/api/billing/${acct.id}/user-request-usage`
   let wroteSomething = false
   const tasks = [
-    fetch(creditUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    authFetch(creditUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       .then((res) => (res.ok ? res.json() : null))
       .then((body) => {
         const snap = body?.extra?.credit
@@ -161,7 +162,7 @@ async function fetchOneExtra(acct: CachedAccount): Promise<void> {
         }
       })
       .catch((e) => console.warn(`[accountData] 拉取 ${acct.uid} credit 失败:`, e)),
-    fetch(usageUrl, {
+    authFetch(usageUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(usageQueryBody(7)),
@@ -295,7 +296,7 @@ async function fetchCheckinStatus(): Promise<void> {
     .map((a) => a.id)
   if (needQuery.length === 0) return
   try {
-    const res = await fetch('/api/checkin/status', {
+    const res = await authFetch('/api/checkin/status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accountIds: needQuery }),

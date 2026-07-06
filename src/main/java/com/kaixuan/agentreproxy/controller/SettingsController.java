@@ -1,6 +1,8 @@
 package com.kaixuan.agentreproxy.controller;
 
+import com.kaixuan.agentreproxy.dto.AdminCredentialRequest;
 import com.kaixuan.agentreproxy.dto.AppSettingResponse;
+import com.kaixuan.agentreproxy.dto.DailyCheckinSettingRequest;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -15,16 +17,24 @@ import java.util.Map;
 /**
  * 应用设置 REST 端点
  * <p>
- * <strong>已删除</strong>:所有 {@code /api/settings/chat.consumption*} 专用端点 —— 全局
- * {@code app_settings.chat.consumption} 设置已被下游 API Key 的 per-key {@code consumption}
- * 字段取代,chat 路由不再消费全局设置。SettingsService 同步删除了 {@code updateConsumption} /
- * {@code getConsumptionValue} / {@code KEY_CHAT_CONSUMPTION} 等。
+ * <strong>设计原则：全局读取 + 局部保存</strong>
+ * <ul>
+ *   <li>读取：{@code GET /api/settings}（一次拉全部）和 {@code GET /api/settings/{key}}（单条）</li>
+ *   <li>保存：各设置项走各自的专有端点（带强类型 DTO + 业务校验），不提供通用写入端点</li>
+ * </ul>
  * <p>
- * <strong>当前</strong>:通用 CRUD 三个端点 —— GET 全部 / GET 单条 / PUT 单条。
- * 任意 key 任意 JSON value,通过 {@code app_settings} 表 + JSON 字符串存储。
+ * <strong>已删除</strong>：
+ * <ul>
+ *   <li>{@code PUT /api/settings/{key}} — 通用 upsert 端点（无类型校验，任意 JSON 入库）</li>
+ *   <li>{@code /api/settings/chat.consumption*} — 全局 chat.consumption 相关端点</li>
+ * </ul>
  * <p>
- * <strong>选号预览</strong>已搬到独立 controller {@code /api/preview/chat-account-batch} —— 不再依赖
- * {@code chat.consumption} 概念。
+ * <strong>当前专有保存端点</strong>：
+ * <ul>
+ *   <li>{@code PUT /api/settings/schedule/daily-checkin} — 定时签到配置</li>
+ *   <li>{@code PUT /api/settings/admin/credential} — 管理员凭证修改</li>
+ * </ul>
+ * 未来新增设置项时，注册新的 {@code PUT /api/settings/xxx/yyy} 专有端点即可。
  */
 @RestController
 @RequestMapping("/api/settings")
@@ -35,6 +45,8 @@ public class SettingsController {
     public SettingsController(SettingsService settingsService) {
         this.settingsService = settingsService;
     }
+
+    // ============== 读取端点（全局） ==============
 
     @GetMapping
     public Map<String, Object> list() {
@@ -47,25 +59,37 @@ public class SettingsController {
         return settingsService.getOne(key).orElse(null);
     }
 
+    // ============== 专有保存端点 ==============
+
     /**
-     * 通用设置 upsert —— {@code PUT /api/settings/{key}}
+     * 定时签到设置专有保存 — {@code PUT /api/settings/schedule/daily-checkin}
      * <p>
-     * 用途:非 {@code chat.consumption} 的全局设置(定时签到 / 主题 / 默认分页大小 等)的统一入口。
+     * <ul>
+     *   <li>强类型请求体 {@link DailyCheckinSettingRequest}（不再是任意 JSON）</li>
+     *   <li>带业务校验（enabled=true 时 time 必填且格式正确）</li>
+     * </ul>
      * <p>
-     * <strong>请求体</strong>:任意 JSON 对象;value 由 service 序列化为 JSON 字符串入库。
-     * 字段缺失(null)存 JSON {@code "null"} 字符串。
-     * <p>
-     * <strong>响应</strong>:跟 {@code GET /api/settings} 一致的 {@code {data: ...}} 结构,
-     * 返回更新后的 AppSettingResponse(key, value, updatedAt)。
-     * <p>
-     * <strong>路径冲突</strong>:注意 {@code /{key}} 路径变量会"吃"所有非专用端点;专用端点
-     * ({@code /chat.consumption}, {@code /chat.consumption/preview} 等)优先级更高
-     * —— Spring MVC 按"具体路径优先于通配路径"匹配,不会被本端点拦截。
+     * <strong>扩展模式</strong>：未来新增设置项（如主题、默认分页大小等），各自注册独立的
+     * {@code PUT /api/settings/xxx/yyy} 端点 + 专有 DTO + 专有校验方法。
      */
-    @PutMapping("/{key}")
-    public Map<String, Object> updateOne(@PathVariable String key, @RequestBody(required = false) Object body) {
-        settingsService.updateByKey(key, body);
-        // 回包用最新 row,保证 updatedAt 反映本次写入
-        return Map.of("data", settingsService.getOne(key).orElse(null));
+    @PutMapping("/schedule/daily-checkin")
+    public Map<String, Object> updateDailyCheckin(@RequestBody DailyCheckinSettingRequest req) {
+        AppSettingResponse result = settingsService.updateDailyCheckinSetting(req);
+        return Map.of("data", result);
+    }
+
+    /**
+     * 管理员凭证修改专有保存 — {@code PUT /api/settings/admin/credential}
+     * <p>
+     * <ul>
+     *   <li>强类型请求体 {@link AdminCredentialRequest}</li>
+     *   <li>必须验证旧密码；新用户名和新密码至少填一项</li>
+     *   <li>密码以 SHA-256 哈希存储，接口不返回密码哈希（脱敏）</li>
+     * </ul>
+     */
+    @PutMapping("/admin/credential")
+    public Map<String, Object> updateAdminCredential(@RequestBody AdminCredentialRequest req) {
+        AppSettingResponse result = settingsService.updateAdminCredential(req);
+        return Map.of("data", result);
     }
 }

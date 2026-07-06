@@ -20,6 +20,7 @@
  * </ul>
  */
 import { ref } from 'vue'
+import { authFetch } from '../utils/auth'
 
 export interface ModelItem {
   id: string
@@ -33,7 +34,7 @@ let loadInFlight: Promise<void> | null = null
 async function fetchFromServer(): Promise<void> {
   try {
     // /api/models 永远返回后端全集(不受 Authorization 影响)
-    const res = await fetch('/api/models')
+    const res = await authFetch('/api/models')
     if (!res.ok) throw new Error(`status=${res.status}`)
     const body = (await res.json().catch(() => ({}))) as { data?: ModelItem[] }
     const list = Array.isArray(body.data) ? body.data : []

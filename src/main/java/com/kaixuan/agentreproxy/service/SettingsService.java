@@ -596,32 +596,18 @@ public class SettingsService {
         return accountSummaries.stream().findFirst();
     }
 
-    // ============== 写(只暴露 chat.consumption 这一个 key,避免泛 key 写入带来的校验扩散)
-    // ==============
-
-    /*
-     * updateConsumption + readConsumptionValue 已删除 —— 绑定到 chat.consumption 全局设置,
-     * 已被通用 updateByKey(String, Object) 取代。新增设置项时调用通用入口,不用再加专用方法。
-     */
+    // ============== 内部持久化 ==============
 
     /**
-     * 通用 upsert —— 按 key 写入任意 JSON 值
+     * 按 key 写入任意 JSON 值（内部方法）
      * <p>
-     * 用途:为非 {@code chat.consumption} 的全局设置(定时签到 / 主题 / 默认分页大小 等)提供通用入口。
-     * <p>
-     * <strong>value 序列化</strong>:传入任意对象(Map / record / 标量),用 ObjectMapper 序列化成 JSON
-     * 字符串后入库。{@code value == null} 时存 "null" 字符串(避免 SQL 空字符串歧义)。
-     * <p>
-     * <strong>无 key 白名单</strong>:本期内不限制 key 名,前端传什么就存什么。后续如需校验
-     * (例如限定 key 形如 {@code schedule.*} / {@code ui.*}),改成 switch 判断即可。
-     * <p>
-     * <strong>无业务校验</strong>:通用方法不校验 value 内容,业务校验由调用方(本期内
-     * 暂时没有 —— 通用入口。
+     * 外部不再暴露通用 upsert；所有设置项的保存都走专有方法（带业务校验），
+     * 专有方法内部复用本方法做序列化 + 持久化。
      *
-     * @param key   app_settings.key(主键)
+     * @param key   app_settings.key（主键）
      * @param value 任意可序列化对象
      */
-    public void updateByKey(String key, Object value) {
+    private void updateByKey(String key, Object value) {
         if (key == null || key.isBlank()) {
             throw new IllegalArgumentException("key 不能为空");
         }
@@ -631,6 +617,184 @@ public class SettingsService {
             repository.upsert(key, json);
         } catch (Exception e) {
             throw new IllegalStateException("序列化或持久化设置失败: " + e.getMessage(), e);
+        }
+    }
+
+    // ============== 专有设置保存 ==============
+
+    /** app_settings key —— 与 {@link ScheduledCheckinScheduler#KEY_SCHEDULE_DAILY_CHECKIN} 一致 */
+    private static final String KEY_SCHEDULE_DAILY_CHECKIN = "schedule.dailyCheckin";
+
+    /** 管理员凭证 key */
+    private static final String KEY_ADMIN_CREDENTIAL = "admin.credential";
+
+    /** 合法的 HH:mm 正则（00:00 ~ 23:59） */
+    private static final java.util.regex.Pattern HH_MM_PATTERN =
+            java.util.regex.Pattern.compile("^([01]\\d|2[0-3]):[0-5]\\d$");
+
+    /**
+     * 保存定时签到设置 — 带业务校验的专有入口
+     * <p>
+     * 校验规则：
+     * <ul>
+     *   <li>{@code enabled} 不能为 null</li>
+     *   <li>{@code enabled=true} 时 {@code time} 不能为空，且必须是 {@code HH:mm} 格式</li>
+     *   <li>{@code enabled=false} 时 {@code time} 可选（有就校验格式，没有就存 null）</li>
+     * </ul>
+     * <p>
+     * 校验通过后，序列化为 JSON 写入 app_settings 表，key = {@code schedule.dailyCheckin}。
+     *
+     * @param req 请求体
+     * @return 更新后的设置响应
+     */
+    public AppSettingResponse updateDailyCheckinSetting(com.kaixuan.agentreproxy.dto.DailyCheckinSettingRequest req) {
+        if (req == null) {
+            throw new IllegalArgumentException("请求体不能为空");
+        }
+        if (req.enabled() == null) {
+            throw new IllegalArgumentException("enabled 不能为空");
+        }
+        String time = req.time() == null ? null : req.time().trim();
+        if (req.enabled()) {
+            if (time == null || time.isEmpty()) {
+                throw new IllegalArgumentException("启用定时签到时，必须指定签到时间");
+            }
+            if (!HH_MM_PATTERN.matcher(time).matches()) {
+                throw new IllegalArgumentException("时间格式不合法，应为 HH:mm（如 08:00）");
+            }
+        } else {
+            // 关闭时如果传了 time，仍校验格式合法性（宽松但不存脏数据）
+            if (time != null && !time.isEmpty() && !HH_MM_PATTERN.matcher(time).matches()) {
+                throw new IllegalArgumentException("时间格式不合法，应为 HH:mm（如 08:00）");
+            }
+        }
+        // 构造最终存储对象
+        var payload = java.util.Map.of(
+                "enabled", req.enabled(),
+                "time", time == null ? "" : time
+        );
+        updateByKey(KEY_SCHEDULE_DAILY_CHECKIN, payload);
+        return getOne(KEY_SCHEDULE_DAILY_CHECKIN).orElse(null);
+    }
+
+    // ---------- 管理员凭证 ----------
+
+    /**
+     * 初始化默认管理员凭证（启动时调用）
+     * <p>
+     * 仅当 key = {@code admin.credential} 不存在时，写入默认的 root/root。
+     * 密码用 SHA-256 哈希存储，不存明文。
+     */
+    public void ensureDefaultAdminCredential() {
+        if (repository.findByKey(KEY_ADMIN_CREDENTIAL).isPresent()) {
+            log.debug("[Settings] admin.credential 已存在，跳过初始化");
+            return;
+        }
+        var payload = Map.of(
+                "username", "root",
+                "passwordHash", sha256("root")
+        );
+        updateByKey(KEY_ADMIN_CREDENTIAL, payload);
+        log.info("[Settings] 已创建默认管理员凭证 (root/root)");
+    }
+
+    /**
+     * 修改管理员凭证 — 带业务校验的专有入口
+     * <p>
+     * 校验规则：
+     * <ul>
+     *   <li>{@code oldPassword} 必填，且必须与当前存储的密码哈希匹配</li>
+     *   <li>{@code newUsername} 选填，非空非纯空格时覆写用户名</li>
+     *   <li>{@code newPassword} 选填，非空时要求 {@code confirmPassword} 一致，覆写密码</li>
+     *   <li>{@code newUsername} 和 {@code newPassword} 不能同时为空（至少改一项）</li>
+     * </ul>
+     *
+     * @param req 请求体
+     * @return 更新后的设置响应（passwordHash 会被 toResponse 脱敏）
+     */
+    public AppSettingResponse updateAdminCredential(com.kaixuan.agentreproxy.dto.AdminCredentialRequest req) {
+        if (req == null) {
+            throw new IllegalArgumentException("请求体不能为空");
+        }
+        // 旧密码必填
+        if (req.oldPassword() == null || req.oldPassword().isBlank()) {
+            throw new IllegalArgumentException("请输入旧密码");
+        }
+
+        // 读取当前凭证
+        Map<String, Object> current = readAdminCredentialMap();
+        String currentHash = current.get("passwordHash") instanceof String h ? h : "";
+
+        // 校验旧密码
+        if (!currentHash.equals(sha256(req.oldPassword()))) {
+            throw new IllegalArgumentException("旧密码不正确");
+        }
+
+        // 判断是否有实际修改
+        String newUsername = req.newUsername() == null ? null : req.newUsername().trim();
+        String newPassword = req.newPassword() == null ? null : req.newPassword().trim();
+        String confirmPassword = req.confirmPassword() == null ? null : req.confirmPassword().trim();
+
+        boolean changeUsername = newUsername != null && !newUsername.isEmpty();
+        boolean changePassword = newPassword != null && !newPassword.isEmpty();
+
+        if (!changeUsername && !changePassword) {
+            throw new IllegalArgumentException("新用户名和新密码至少需要填写一项");
+        }
+
+        // 校验新密码确认
+        if (changePassword) {
+            if (confirmPassword == null || confirmPassword.isEmpty()) {
+                throw new IllegalArgumentException("请确认新密码");
+            }
+            if (!newPassword.equals(confirmPassword)) {
+                throw new IllegalArgumentException("两次输入的新密码不一致");
+            }
+        }
+
+        // 构造最终存储对象（部分覆写）
+        String finalUsername = changeUsername ? newUsername
+                : (current.get("username") instanceof String u ? u : "root");
+        String finalHash = changePassword ? sha256(newPassword) : currentHash;
+
+        var payload = Map.of(
+                "username", finalUsername,
+                "passwordHash", finalHash
+        );
+        updateByKey(KEY_ADMIN_CREDENTIAL, payload);
+        return getOne(KEY_ADMIN_CREDENTIAL).orElse(null);
+    }
+
+    /**
+     * 读取当前管理员凭证的原始 Map（内部用，含 passwordHash）
+     */
+    private Map<String, Object> readAdminCredentialMap() {
+        return repository.findByKey(KEY_ADMIN_CREDENTIAL)
+                .map(rec -> {
+                    try {
+                        return objectMapper.readValue(rec.value(),
+                                new TypeReference<Map<String, Object>>() {});
+                    } catch (Exception e) {
+                        return Map.<String, Object>of();
+                    }
+                })
+                .orElseGet(() -> Map.of("username", "root", "passwordHash", sha256("root")));
+    }
+
+    /**
+     * SHA-256 哈希（十六进制小写）
+     */
+    private static String sha256(String input) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
         }
     }
 
@@ -644,6 +808,13 @@ public class SettingsService {
             });
         } catch (Exception e) {
             value = rec.value();
+        }
+        // 凭证条目脱敏：只返回 username，不暴露 passwordHash
+        if (KEY_ADMIN_CREDENTIAL.equals(rec.key()) && value instanceof Map<?, ?> map) {
+            var sanitized = new java.util.LinkedHashMap<String, Object>();
+            Object username = map.get("username");
+            sanitized.put("username", username != null ? username : "");
+            value = sanitized;
         }
         return new AppSettingResponse(rec.key(), value, rec.updatedAt());
     }
