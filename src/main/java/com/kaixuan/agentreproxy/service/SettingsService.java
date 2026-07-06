@@ -625,6 +625,9 @@ public class SettingsService {
     /** app_settings key —— 与 {@link ScheduledCheckinScheduler#KEY_SCHEDULE_DAILY_CHECKIN} 一致 */
     private static final String KEY_SCHEDULE_DAILY_CHECKIN = "schedule.dailyCheckin";
 
+    /** 管理员凭证 key */
+    private static final String KEY_ADMIN_CREDENTIAL = "admin.credential";
+
     /** 合法的 HH:mm 正则（00:00 ~ 23:59） */
     private static final java.util.regex.Pattern HH_MM_PATTERN =
             java.util.regex.Pattern.compile("^([01]\\d|2[0-3]):[0-5]\\d$");
@@ -674,6 +677,127 @@ public class SettingsService {
         return getOne(KEY_SCHEDULE_DAILY_CHECKIN).orElse(null);
     }
 
+    // ---------- 管理员凭证 ----------
+
+    /**
+     * 初始化默认管理员凭证（启动时调用）
+     * <p>
+     * 仅当 key = {@code admin.credential} 不存在时，写入默认的 root/root。
+     * 密码用 SHA-256 哈希存储，不存明文。
+     */
+    public void ensureDefaultAdminCredential() {
+        if (repository.findByKey(KEY_ADMIN_CREDENTIAL).isPresent()) {
+            log.debug("[Settings] admin.credential 已存在，跳过初始化");
+            return;
+        }
+        var payload = Map.of(
+                "username", "root",
+                "passwordHash", sha256("root")
+        );
+        updateByKey(KEY_ADMIN_CREDENTIAL, payload);
+        log.info("[Settings] 已创建默认管理员凭证 (root/root)");
+    }
+
+    /**
+     * 修改管理员凭证 — 带业务校验的专有入口
+     * <p>
+     * 校验规则：
+     * <ul>
+     *   <li>{@code oldPassword} 必填，且必须与当前存储的密码哈希匹配</li>
+     *   <li>{@code newUsername} 选填，非空非纯空格时覆写用户名</li>
+     *   <li>{@code newPassword} 选填，非空时要求 {@code confirmPassword} 一致，覆写密码</li>
+     *   <li>{@code newUsername} 和 {@code newPassword} 不能同时为空（至少改一项）</li>
+     * </ul>
+     *
+     * @param req 请求体
+     * @return 更新后的设置响应（passwordHash 会被 toResponse 脱敏）
+     */
+    public AppSettingResponse updateAdminCredential(com.kaixuan.agentreproxy.dto.AdminCredentialRequest req) {
+        if (req == null) {
+            throw new IllegalArgumentException("请求体不能为空");
+        }
+        // 旧密码必填
+        if (req.oldPassword() == null || req.oldPassword().isBlank()) {
+            throw new IllegalArgumentException("请输入旧密码");
+        }
+
+        // 读取当前凭证
+        Map<String, Object> current = readAdminCredentialMap();
+        String currentHash = current.get("passwordHash") instanceof String h ? h : "";
+
+        // 校验旧密码
+        if (!currentHash.equals(sha256(req.oldPassword()))) {
+            throw new IllegalArgumentException("旧密码不正确");
+        }
+
+        // 判断是否有实际修改
+        String newUsername = req.newUsername() == null ? null : req.newUsername().trim();
+        String newPassword = req.newPassword() == null ? null : req.newPassword().trim();
+        String confirmPassword = req.confirmPassword() == null ? null : req.confirmPassword().trim();
+
+        boolean changeUsername = newUsername != null && !newUsername.isEmpty();
+        boolean changePassword = newPassword != null && !newPassword.isEmpty();
+
+        if (!changeUsername && !changePassword) {
+            throw new IllegalArgumentException("新用户名和新密码至少需要填写一项");
+        }
+
+        // 校验新密码确认
+        if (changePassword) {
+            if (confirmPassword == null || confirmPassword.isEmpty()) {
+                throw new IllegalArgumentException("请确认新密码");
+            }
+            if (!newPassword.equals(confirmPassword)) {
+                throw new IllegalArgumentException("两次输入的新密码不一致");
+            }
+        }
+
+        // 构造最终存储对象（部分覆写）
+        String finalUsername = changeUsername ? newUsername
+                : (current.get("username") instanceof String u ? u : "root");
+        String finalHash = changePassword ? sha256(newPassword) : currentHash;
+
+        var payload = Map.of(
+                "username", finalUsername,
+                "passwordHash", finalHash
+        );
+        updateByKey(KEY_ADMIN_CREDENTIAL, payload);
+        return getOne(KEY_ADMIN_CREDENTIAL).orElse(null);
+    }
+
+    /**
+     * 读取当前管理员凭证的原始 Map（内部用，含 passwordHash）
+     */
+    private Map<String, Object> readAdminCredentialMap() {
+        return repository.findByKey(KEY_ADMIN_CREDENTIAL)
+                .map(rec -> {
+                    try {
+                        return objectMapper.readValue(rec.value(),
+                                new TypeReference<Map<String, Object>>() {});
+                    } catch (Exception e) {
+                        return Map.<String, Object>of();
+                    }
+                })
+                .orElseGet(() -> Map.of("username", "root", "passwordHash", sha256("root")));
+    }
+
+    /**
+     * SHA-256 哈希（十六进制小写）
+     */
+    private static String sha256(String input) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
+    }
+
     // ============== 内部 ==============
 
     private AppSettingResponse toResponse(AppSettingRecord rec) {
@@ -684,6 +808,13 @@ public class SettingsService {
             });
         } catch (Exception e) {
             value = rec.value();
+        }
+        // 凭证条目脱敏：只返回 username，不暴露 passwordHash
+        if (KEY_ADMIN_CREDENTIAL.equals(rec.key()) && value instanceof Map<?, ?> map) {
+            var sanitized = new java.util.LinkedHashMap<String, Object>();
+            Object username = map.get("username");
+            sanitized.put("username", username != null ? username : "");
+            value = sanitized;
         }
         return new AppSettingResponse(rec.key(), value, rec.updatedAt());
     }

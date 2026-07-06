@@ -1,5 +1,6 @@
 package com.kaixuan.agentreproxy.controller;
 
+import com.kaixuan.agentreproxy.dto.AdminCredentialRequest;
 import com.kaixuan.agentreproxy.dto.AppSettingResponse;
 import com.kaixuan.agentreproxy.dto.DailyCheckinSettingRequest;
 import com.kaixuan.agentreproxy.service.SettingsService;
@@ -31,6 +32,7 @@ import java.util.Map;
  * <strong>当前专有保存端点</strong>：
  * <ul>
  *   <li>{@code PUT /api/settings/schedule/daily-checkin} — 定时签到配置</li>
+ *   <li>{@code PUT /api/settings/admin/credential} — 管理员凭证修改</li>
  * </ul>
  * 未来新增设置项时，注册新的 {@code PUT /api/settings/xxx/yyy} 专有端点即可。
  */
@@ -73,6 +75,21 @@ public class SettingsController {
     @PutMapping("/schedule/daily-checkin")
     public Map<String, Object> updateDailyCheckin(@RequestBody DailyCheckinSettingRequest req) {
         AppSettingResponse result = settingsService.updateDailyCheckinSetting(req);
+        return Map.of("data", result);
+    }
+
+    /**
+     * 管理员凭证修改专有保存 — {@code PUT /api/settings/admin/credential}
+     * <p>
+     * <ul>
+     *   <li>强类型请求体 {@link AdminCredentialRequest}</li>
+     *   <li>必须验证旧密码；新用户名和新密码至少填一项</li>
+     *   <li>密码以 SHA-256 哈希存储，接口不返回密码哈希（脱敏）</li>
+     * </ul>
+     */
+    @PutMapping("/admin/credential")
+    public Map<String, Object> updateAdminCredential(@RequestBody AdminCredentialRequest req) {
+        AppSettingResponse result = settingsService.updateAdminCredential(req);
         return Map.of("data", result);
     }
 }
