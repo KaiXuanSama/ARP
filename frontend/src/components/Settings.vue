@@ -1,19 +1,16 @@
 <script setup lang="ts">
 /**
- * 定时签到设置页面
+ * 系统设置页面
  * <p>
- * 当前只承载"定时签到"一项全局设置,以独立卡片呈现:
- *  - 卡片标题:定时签到
- *  - 卡片描述:说明开启后的行为
- *  - 卡片体:启用开关 + 时间选择器
- *  - 卡片底部:独立的保存按钮
+ * 设计原则：全局读取 + 局部保存
+ *  - 读取：GET /api/settings（一次拉全部设置项，前端按 key 分发到各卡片）
+ *  - 保存：各设置项走各自的专有端点（带强类型校验），互不干扰
  * <p>
- * <strong>已对接后端</strong>:
- *  - 读取:GET /api/settings(列表,本页面 find 对应 key,便于未来扩展新配置项)
- *  - 写入:PUT /api/settings/schedule.dailyCheckin(通用 KV 端点,
- *    value 是 JSON 字符串 {"enabled":bool,"time":"HH:mm"})
+ * 当前设置项：
+ *  - 定时签到：PUT /api/settings/schedule/daily-checkin
  * <p>
- * 复用现有的 {@code app_settings} 表 + JSON 存储约定。
+ * 未来新增设置项时，在本页面追加新卡片 + 新 ref + 新 save 函数即可，
+ * 每个卡片独立保存，不影响其他设置。
  */
 import { computed, onMounted, ref } from 'vue'
 import { NSwitch, NTimePicker, NButton, NSpace, useMessage } from 'naive-ui'
@@ -88,9 +85,12 @@ async function loadFromServer(): Promise<void> {
 }
 
 /**
- * Save 按钮 handler —— PUT /api/settings/schedule.dailyCheckin
+ * Save 按钮 handler — PUT /api/settings/schedule/daily-checkin（专有端点）
  * <p>
- * 后端通用端点:不限定 key,任意 JSON 入库。响应跟 GET 一致,回包带最新 updatedAt。
+ * 读取仍走全局 GET /api/settings（一次拉全部），但保存走专有端点：
+ * - 后端强类型 DTO + 业务校验（enabled=true 时 time 必填且格式正确）
+ * - 路径更具体，语义更清晰
+ * - 未来新增设置项（主题 / 默认分页大小等），各自走独立端点保存，互不干扰
  */
 async function saveSettings(): Promise<void> {
   if (saving.value) return
@@ -106,7 +106,7 @@ async function saveSettings(): Promise<void> {
       enabled: scheduleEnabled.value,
       time,
     }
-    const res = await fetch(`/api/settings/${encodeURIComponent(SCHEDULE_KEY)}`, {
+    const res = await fetch('/api/settings/schedule/daily-checkin', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

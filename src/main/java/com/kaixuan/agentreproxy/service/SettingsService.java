@@ -596,32 +596,18 @@ public class SettingsService {
         return accountSummaries.stream().findFirst();
     }
 
-    // ============== 写(只暴露 chat.consumption 这一个 key,避免泛 key 写入带来的校验扩散)
-    // ==============
-
-    /*
-     * updateConsumption + readConsumptionValue 已删除 —— 绑定到 chat.consumption 全局设置,
-     * 已被通用 updateByKey(String, Object) 取代。新增设置项时调用通用入口,不用再加专用方法。
-     */
+    // ============== 内部持久化 ==============
 
     /**
-     * 通用 upsert —— 按 key 写入任意 JSON 值
+     * 按 key 写入任意 JSON 值（内部方法）
      * <p>
-     * 用途:为非 {@code chat.consumption} 的全局设置(定时签到 / 主题 / 默认分页大小 等)提供通用入口。
-     * <p>
-     * <strong>value 序列化</strong>:传入任意对象(Map / record / 标量),用 ObjectMapper 序列化成 JSON
-     * 字符串后入库。{@code value == null} 时存 "null" 字符串(避免 SQL 空字符串歧义)。
-     * <p>
-     * <strong>无 key 白名单</strong>:本期内不限制 key 名,前端传什么就存什么。后续如需校验
-     * (例如限定 key 形如 {@code schedule.*} / {@code ui.*}),改成 switch 判断即可。
-     * <p>
-     * <strong>无业务校验</strong>:通用方法不校验 value 内容,业务校验由调用方(本期内
-     * 暂时没有 —— 通用入口。
+     * 外部不再暴露通用 upsert；所有设置项的保存都走专有方法（带业务校验），
+     * 专有方法内部复用本方法做序列化 + 持久化。
      *
-     * @param key   app_settings.key(主键)
+     * @param key   app_settings.key（主键）
      * @param value 任意可序列化对象
      */
-    public void updateByKey(String key, Object value) {
+    private void updateByKey(String key, Object value) {
         if (key == null || key.isBlank()) {
             throw new IllegalArgumentException("key 不能为空");
         }
@@ -632,6 +618,60 @@ public class SettingsService {
         } catch (Exception e) {
             throw new IllegalStateException("序列化或持久化设置失败: " + e.getMessage(), e);
         }
+    }
+
+    // ============== 专有设置保存 ==============
+
+    /** app_settings key —— 与 {@link ScheduledCheckinScheduler#KEY_SCHEDULE_DAILY_CHECKIN} 一致 */
+    private static final String KEY_SCHEDULE_DAILY_CHECKIN = "schedule.dailyCheckin";
+
+    /** 合法的 HH:mm 正则（00:00 ~ 23:59） */
+    private static final java.util.regex.Pattern HH_MM_PATTERN =
+            java.util.regex.Pattern.compile("^([01]\\d|2[0-3]):[0-5]\\d$");
+
+    /**
+     * 保存定时签到设置 — 带业务校验的专有入口
+     * <p>
+     * 校验规则：
+     * <ul>
+     *   <li>{@code enabled} 不能为 null</li>
+     *   <li>{@code enabled=true} 时 {@code time} 不能为空，且必须是 {@code HH:mm} 格式</li>
+     *   <li>{@code enabled=false} 时 {@code time} 可选（有就校验格式，没有就存 null）</li>
+     * </ul>
+     * <p>
+     * 校验通过后，序列化为 JSON 写入 app_settings 表，key = {@code schedule.dailyCheckin}。
+     *
+     * @param req 请求体
+     * @return 更新后的设置响应
+     */
+    public AppSettingResponse updateDailyCheckinSetting(com.kaixuan.agentreproxy.dto.DailyCheckinSettingRequest req) {
+        if (req == null) {
+            throw new IllegalArgumentException("请求体不能为空");
+        }
+        if (req.enabled() == null) {
+            throw new IllegalArgumentException("enabled 不能为空");
+        }
+        String time = req.time() == null ? null : req.time().trim();
+        if (req.enabled()) {
+            if (time == null || time.isEmpty()) {
+                throw new IllegalArgumentException("启用定时签到时，必须指定签到时间");
+            }
+            if (!HH_MM_PATTERN.matcher(time).matches()) {
+                throw new IllegalArgumentException("时间格式不合法，应为 HH:mm（如 08:00）");
+            }
+        } else {
+            // 关闭时如果传了 time，仍校验格式合法性（宽松但不存脏数据）
+            if (time != null && !time.isEmpty() && !HH_MM_PATTERN.matcher(time).matches()) {
+                throw new IllegalArgumentException("时间格式不合法，应为 HH:mm（如 08:00）");
+            }
+        }
+        // 构造最终存储对象
+        var payload = java.util.Map.of(
+                "enabled", req.enabled(),
+                "time", time == null ? "" : time
+        );
+        updateByKey(KEY_SCHEDULE_DAILY_CHECKIN, payload);
+        return getOne(KEY_SCHEDULE_DAILY_CHECKIN).orElse(null);
     }
 
     // ============== 内部 ==============
