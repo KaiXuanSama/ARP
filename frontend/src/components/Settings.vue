@@ -15,6 +15,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { NSwitch, NTimePicker, NButton, NSpace, NInput, useMessage } from 'naive-ui'
+import { authFetch } from '../utils/auth'
 
 const message = useMessage()
 
@@ -62,7 +63,7 @@ async function saveAdminCredential(): Promise<void> {
       confirmPassword: hasNewPwd ? confirmPassword.value : null,
       oldPassword: oldPassword.value,
     }
-    const res = await fetch('/api/settings/admin/credential', {
+    const res = await authFetch('/api/settings/admin/credential', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -138,7 +139,7 @@ interface SettingListItem {
  */
 async function loadFromServer(): Promise<void> {
   try {
-    const res = await fetch('/api/settings')
+    const res = await authFetch('/api/settings')
     if (!res.ok) {
       throw new Error(`status=${res.status}`)
     }
@@ -188,7 +189,7 @@ async function saveSettings(): Promise<void> {
       enabled: scheduleEnabled.value,
       time,
     }
-    const res = await fetch('/api/settings/schedule/daily-checkin', {
+    const res = await authFetch('/api/settings/schedule/daily-checkin', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

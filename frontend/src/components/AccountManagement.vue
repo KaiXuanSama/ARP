@@ -26,6 +26,7 @@ import type {
   UsageSnapshot,
 } from '../utils/accountExtras'
 import { useAccountData, type AccountDataView } from '../composables/useAccountData'
+import { authFetch } from '../utils/auth'
 
 interface WorkbuddyInfo {
   account?: {
@@ -194,7 +195,7 @@ async function forceCheckin() {
   checkingIn.value = true
   try {
     resetCheckinProgress(allIds)
-    const res = await fetch('/api/checkin/execute-stream', {
+    const res = await authFetch('/api/checkin/execute-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accountIds: allIds, force: true }),
@@ -625,7 +626,7 @@ async function toggleAccountEnabled(row: AccountRow, newEnabled: boolean): Promi
  togglingEnabledIds.value.add(row.id)
  togglingEnabledIds.value = new Set(togglingEnabledIds.value)
  try {
- const res = await fetch(`/api/accounts/${row.id}/enabled`, {
+ const res = await authFetch(`/api/accounts/${row.id}/enabled`, {
  method: 'PATCH',
  headers: { 'Content-Type': 'application/json' },
  body: JSON.stringify({ enabled: newEnabled }),
@@ -692,7 +693,7 @@ async function oneClickCheckin() {
   checkingIn.value = true
   try {
     resetCheckinProgress(targets)
-    const res = await fetch('/api/checkin/execute-stream', {
+    const res = await authFetch('/api/checkin/execute-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accountIds: targets }),
@@ -861,7 +862,7 @@ async function loadFromLocal() {
   detailInfo.value = null
   showAccessToken.value = false
   try {
-    const res = await fetch('/api/workbuddy-info')
+    const res = await authFetch('/api/workbuddy-info')
     if (!res.ok) throw new Error(`请求失败: ${res.status}`)
     detailInfo.value = await res.json()
   } catch (e: unknown) {
@@ -883,7 +884,7 @@ async function handleFileUpload({ file }: { file: UploadFileInfo }) {
   try {
     const form = new FormData()
     form.append('file', file.file)
-    const res = await fetch('/api/import-info', { method: 'POST', body: form })
+    const res = await authFetch('/api/import-info', { method: 'POST', body: form })
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}))
       throw new Error(errBody?.message || `请求失败: ${res.status}`)
@@ -916,7 +917,7 @@ async function saveApiKeyOnly() {
       account: { nickname: apiKeyForm.value.nickname.trim() || undefined },
       apiKey: apiKeyForm.value.apiKey.trim(),
     }
-    const res = await fetch('/api/accounts', {
+    const res = await authFetch('/api/accounts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -951,7 +952,7 @@ async function saveDetail() {
   if (!detailInfo.value) return
   savingDetail.value = true
   try {
-    const res = await fetch('/api/accounts', {
+    const res = await authFetch('/api/accounts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(detailInfo.value),
@@ -1112,7 +1113,7 @@ async function confirmDelete(): Promise<void> {
   deleting.value = true
   try {
     const target = deleteTarget.value
-    const res = await fetch(`/api/accounts/${target.id}`, { method: 'DELETE' })
+    const res = await authFetch(`/api/accounts/${target.id}`, { method: 'DELETE' })
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}))
       throw new Error(errBody?.message || `HTTP ${res.status}`)
@@ -1137,7 +1138,7 @@ async function loadHistory(): Promise<void> {
   historyLoading.value = true
   historyError.value = null
   try {
-    const res = await fetch('/api/checkin/history', {
+    const res = await authFetch('/api/checkin/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

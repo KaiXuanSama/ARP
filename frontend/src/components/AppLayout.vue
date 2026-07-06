@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { NDropdown } from 'naive-ui'
 import Icon from './Icon.vue'
+import { clearToken, authFetch } from '../utils/auth'
 
 interface NavItem {
   key: string
@@ -29,6 +31,21 @@ const crumbSub = computed<string>(() => (route.meta?.sub as string) ?? '')
 function go(item: NavItem) {
   if (item.disabled) return
   router.push(item.to)
+}
+
+// ===== 登出 =====
+const userMenuOptions = [
+  { label: '登出', key: 'logout' },
+]
+
+async function handleUserMenuSelect(key: string) {
+  if (key === 'logout') {
+    try {
+      await authFetch('/api/auth/logout', { method: 'POST' })
+    } catch { /* 忽略网络错误，仍然清 token */ }
+    clearToken()
+    router.replace('/login')
+  }
 }
 </script>
 
@@ -70,7 +87,12 @@ function go(item: NavItem) {
           <span class="crumb-sub">{{ crumbSub }}</span>
         </div>
         <div class="topbar-right">
-          <span class="user-chip">管理员</span>
+          <n-dropdown :options="userMenuOptions" trigger="click" @select="handleUserMenuSelect">
+            <span class="user-chip user-chip-clickable">
+              管理员
+              <Icon name="settings" :size="12" />
+            </span>
+          </n-dropdown>
         </div>
       </header>
       <section class="content">
@@ -219,6 +241,17 @@ function go(item: NavItem) {
   border: 1px solid #ececf0;
   border-radius: 4px;
   background: #fafbfc;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.user-chip-clickable {
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.user-chip-clickable:hover {
+  background: #f2f3f5;
+  border-color: #d9dadd;
 }
 
 .content {

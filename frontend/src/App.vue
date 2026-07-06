@@ -1,13 +1,24 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import { NMessageProvider } from 'naive-ui'
 import AppLayout from './components/AppLayout.vue'
+
+const route = useRoute()
+/** 登录页不包裹 AppLayout */
+const isPublic = computed(() => route.meta?.public === true)
 </script>
 
 <template>
   <n-message-provider>
-    <AppLayout>
+    <template v-if="isPublic">
       <router-view />
-    </AppLayout>
+    </template>
+    <template v-else>
+      <AppLayout>
+        <router-view />
+      </AppLayout>
+    </template>
   </n-message-provider>
 </template>
 
