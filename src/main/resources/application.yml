@@ -1,0 +1,31 @@
+﻿spring:
+  application:
+    name: agentreproxy
+  datasource:
+    url: ${SQLITE_URL:jdbc:sqlite:./agentreproxy.db}
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 10
+  sql:
+    init:
+      mode: always
+  # WebFlux 内存缓冲阈值:超过此大小会落盘到临时目录。
+  # 设为 25MB 是为了承接 /v1/chat/completions 的长上下文(目前 ~257KB,
+  # 未来 1M token 场景约 4MB+),避免被默认 512KB 拦下报 413。
+  # Spring 启动时会自动把这个值透传到 Netty HttpRequestDecoderSpec.maxContentLength。
+  # Spring 3.5 路径:spring.http.codecs.max-in-memory-size(旧 spring.codec.* 已废弃)
+  http:
+    codecs:
+      max-in-memory-size: 25MB
+
+# Docker 环境配置
+server:
+  port: 8351
+
+# 模型列表外部配置(支持 yml / 命令行 / 环境变量覆盖)
+#   - 文件不存在时回退到 classpath 内置 models-config.default.json
+#   - 命令行覆盖: --models.config.path=D:\conf\modelsConfig.json
+#   - 环境变量覆盖(Spring 自动映射): set MODELS_CONFIG_PATH=D:\conf\modelsConfig.json
+models:
+  config:
+    path: ./modelsConfig.json

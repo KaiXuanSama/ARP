@@ -45,9 +45,6 @@ agentreproxy.db-journal
 *.db-journal
 data/
 
-### Runtime configuration ###
-application.yml
-
 ## Log
 *.log
 
@@ -66,9 +63,12 @@ src/main/resources/static/index.html
 
 # PowerShell scripts
 *.ps1
+!/launcher/package.ps1
 
 # GitHub Actions
 .github
 
 # JSON files
 /*.json
+
+*.exe
