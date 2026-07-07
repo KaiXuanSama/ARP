@@ -275,14 +275,30 @@ class ArpLauncher : ApplicationContext
 
     private void StopJavaProcess()
     {
-        if (javaProcess != null && !javaProcess.HasExited)
+        if (javaProcess != null)
         {
             try
             {
-                // 先尝试优雅关闭（发送 Ctrl+C 信号）
-                // 但 CreateNoWindow 模式下不太可靠，直接 Kill
-                javaProcess.Kill();
-                javaProcess.WaitForExit(5000);
+                if (!javaProcess.HasExited)
+                {
+                    int pid = javaProcess.Id;
+                    // 用 taskkill /T 杀掉整个进程树
+                    // Process.Kill() 只杀直接进程，不杀子进程；
+                    // Java 可能 fork 了 worker 线程/进程，必须连带清理
+                    var killPsi = new ProcessStartInfo
+                    {
+                        FileName = "taskkill",
+                        Arguments = string.Format("/T /F /PID {0}", pid),
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    using (var killProc = Process.Start(killPsi))
+                    {
+                        if (killProc != null) killProc.WaitForExit(5000);
+                    }
+                    // 等待进程真正退出
+                    javaProcess.WaitForExit(5000);
+                }
             }
             catch { }
             finally
