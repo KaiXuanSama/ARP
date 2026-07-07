@@ -221,8 +221,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let semaphore = DispatchSemaphore(value: 0)
         var ready = false
-        URLSession.shared.dataTask(with: request) { _, response, _ in
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            // 任何 HTTP 响应都说明服务已启动（含 401/403 等需要认证的状态）
+            if response is HTTPURLResponse {
                 ready = true
             }
             semaphore.signal()

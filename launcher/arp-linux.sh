@@ -101,7 +101,7 @@ for i in $(seq 1 120); do
         echo "[ARP] 错误：服务进程意外退出"
         exit 1
     fi
-    if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/api/accounts" 2>/dev/null | grep -q "200"; then
+    if curl -s -o /dev/null -w "" "http://127.0.0.1:$PORT/api/accounts" 2>/dev/null; then
         echo ""
         echo "[ARP] 服务已启动 → http://127.0.0.1:$PORT"
         # 尝试打开浏览器

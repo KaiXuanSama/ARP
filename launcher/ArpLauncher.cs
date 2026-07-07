@@ -248,8 +248,16 @@ class ArpLauncher : ApplicationContext
             request.Method = "GET";
             using (var response = (HttpWebResponse)request.GetResponse())
             {
-                return response.StatusCode == HttpStatusCode.OK;
+                // 任何 HTTP 响应都说明服务已启动（含 401/403 等需要认证的状态）
+                return true;
             }
+        }
+        catch (WebException ex)
+        {
+            // WebException 带 Response 说明服务已响应（如 401），只是状态码非 2xx
+            if (ex.Response != null) return true;
+            // 无 Response = 连接失败，服务还没起来
+            return false;
         }
         catch
         {
