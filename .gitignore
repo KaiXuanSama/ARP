@@ -63,7 +63,10 @@ src/main/resources/static/index.html
 
 # PowerShell scripts
 *.ps1
-!/launcher/package.ps1
+!/launcher/package-win.ps1
+
+# Shell scripts generated at runtime
+/generate-icons.ps1
 
 # GitHub Actions
 .github
@@ -71,4 +74,10 @@ src/main/resources/static/index.html
 # JSON files
 /*.json
 
+# Build artifacts
 *.exe
+dist/
+launcher/ARP
+launcher/arp.ico
+launcher/arp.icns
+/arp.ico
