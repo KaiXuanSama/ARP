@@ -45,9 +45,6 @@ agentreproxy.db-journal
 *.db-journal
 data/
 
-### Runtime configuration ###
-application.yml
-
 ## Log
 *.log
 
@@ -66,9 +63,22 @@ src/main/resources/static/index.html
 
 # PowerShell scripts
 *.ps1
+!/launcher/package-win.ps1
 
-# GitHub Actions
-.github
+# Shell scripts generated at runtime
+/generate-icons.ps1
+
+# GitHub (keep workflows, instructions, skills)
+.github/ISSUE_TEMPLATE
+.github/PULL_REQUEST_TEMPLATE
 
 # JSON files
 /*.json
+
+# Build artifacts
+*.exe
+dist/
+launcher/ARP
+launcher/arp.ico
+launcher/arp.icns
+/arp.ico

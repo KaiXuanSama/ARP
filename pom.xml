@@ -59,7 +59,7 @@
 				<artifactId>spring-boot-maven-plugin</artifactId>
 			</plugin>
 
-			<!-- 前端构建集成：在 compile 阶段自动构建 Vue 3 项目 -->
+			<!-- 前端构建集成：在 generate-resources 阶段自动构建 Vue 3 项目 -->
 			<plugin>
 				<groupId>com.github.eirslett</groupId>
 				<artifactId>frontend-maven-plugin</artifactId>
@@ -97,6 +97,27 @@
 							<arguments>run build</arguments>
 							<workingDirectory>frontend</workingDirectory>
 						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+
+			<!--
+				修复 Vite emptyOutDir 导致 jar 内资源丢失的问题：
+				Vite build（generate-resources 阶段）会先清空 src/main/resources/static/ 再写入，
+				导致 maven-resources-plugin 的增量同步误删 target/classes/ 中已复制的
+				application.yml / schema.sql 等文件。
+				在 prepare-package 阶段（jar:jar 之前）重新复制一次资源，确保 jar 内容完整。
+			-->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-resources-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>re-copy-resources-before-jar</id>
+						<phase>prepare-package</phase>
+						<goals>
+							<goal>resources</goal>
+						</goals>
 					</execution>
 				</executions>
 			</plugin>
