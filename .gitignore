@@ -68,8 +68,9 @@ src/main/resources/static/index.html
 # Shell scripts generated at runtime
 /generate-icons.ps1
 
-# GitHub Actions
-.github
+# GitHub (keep workflows, instructions, skills)
+.github/ISSUE_TEMPLATE
+.github/PULL_REQUEST_TEMPLATE
 
 # JSON files
 /*.json
