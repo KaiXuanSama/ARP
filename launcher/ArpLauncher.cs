@@ -74,6 +74,8 @@ class ArpLauncher : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("重启服务", null, OnRestart);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("GitHub 仓库", null, OnOpenGitHub);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, OnExit);
         trayIcon.ContextMenuStrip = menu;
 
@@ -82,6 +84,9 @@ class ArpLauncher : ApplicationContext
 
         // 启动后端服务
         StartJavaProcess();
+
+        // 启动提示
+        trayIcon.ShowBalloonTip(2000, "ARP", "服务正在启动...", ToolTipIcon.Info);
 
         // 等服务就绪后自动打开浏览器
         var readyThread = new Thread(WaitAndOpenBrowser) { IsBackground = true };
@@ -217,6 +222,7 @@ class ArpLauncher : ApplicationContext
             {
                 Thread.Sleep(500); // 额外等半秒确保完全就绪
                 OpenBrowser("http://127.0.0.1:" + port);
+                trayIcon.ShowBalloonTip(2000, "ARP", "服务已启动", ToolTipIcon.Info);
                 return;
             }
             Thread.Sleep(500);
@@ -264,10 +270,17 @@ class ArpLauncher : ApplicationContext
         trayIcon.ShowBalloonTip(2000, "ARP", "服务正在重启...", ToolTipIcon.Info);
     }
 
+    private void OnOpenGitHub(object sender, EventArgs e)
+    {
+        OpenBrowser("https://github.com/KaiXuanSama/ARP");
+    }
+
     private void OnExit(object sender, EventArgs e)
     {
         isExiting = true;
         StopJavaProcess();
+        trayIcon.ShowBalloonTip(2000, "ARP", "服务已停止", ToolTipIcon.Info);
+        Thread.Sleep(1000);
         trayIcon.Visible = false;
         trayIcon.Dispose();
         Application.Exit();
