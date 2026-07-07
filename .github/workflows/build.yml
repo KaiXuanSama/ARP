@@ -28,7 +28,9 @@ jobs:
           distribution: 'temurin'
 
       - name: Build Spring Boot jar
-        run: ./mvnw clean package -DskipTests
+        run: |
+          chmod +x mvnw
+          ./mvnw clean package -DskipTests
 
       - name: Upload jar artifact
         uses: actions/upload-artifact@v4
