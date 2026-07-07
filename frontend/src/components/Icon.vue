@@ -7,7 +7,18 @@ defineProps<{
 </script>
 
 <template>
+  <!-- Logo 用位图渲染（复杂像素画不适合 SVG path） -->
+  <img
+    v-if="name === 'logo'"
+    src="/logo192.png"
+    alt="ARP"
+    :width="size ?? 18"
+    :height="size ?? 18"
+    style="border-radius: 4px; display: inline-block; vertical-align: middle;"
+    aria-hidden="true"
+  />
   <svg
+    v-else
     :width="size ?? 18"
     :height="size ?? 18"
     viewBox="0 0 24 24"
@@ -76,12 +87,7 @@ defineProps<{
       <line x1="1" y1="1" x2="23" y2="23" />
     </g>
 
-    <!-- Logo -->
-    <g v-else-if="name === 'logo'">
-      <rect x="3" y="3" width="18" height="18" rx="3" />
-      <path d="M8 12h8" />
-      <path d="M12 8v8" />
-    </g>
+    <!-- Logo: handled by <img> above, not rendered in SVG -->
 
     <!-- 钥匙 (key) -->
     <g v-else-if="name === 'key'">
