@@ -213,7 +213,12 @@ jobs:
       - name: Create zip
         run: |
           cd dist
-          zip -r -q ARP-macos.zip ARP.app
+          # 清除隔离属性，防止用户解压后被 Gatekeeper 报"已损坏"
+          xattr -cr ARP.app
+          # 确保可执行权限
+          chmod +x ARP.app/Contents/MacOS/ARP
+          # 使用 ditto 打包（保留 macOS 元数据和权限，比 zip 更可靠）
+          ditto -c -k --keepParent ARP.app ARP-macos.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

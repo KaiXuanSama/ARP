@@ -180,7 +180,11 @@ echo "Creating distributable archive..."
 ZIP_FILE="$DIST_DIR/ARP-macos.zip"
 rm -f "$ZIP_FILE"
 cd "$DIST_DIR"
-zip -r -q "$ZIP_FILE" "$APP_NAME.app"
+# 清除隔离属性，防止 Gatekeeper 报"已损坏"
+xattr -cr "$APP_NAME.app"
+chmod +x "$APP_NAME.app/Contents/MacOS/ARP"
+# ditto 保留 macOS 元数据和权限
+ditto -c -k --keepParent "$APP_NAME.app" ARP-macos.zip
 ZIP_SIZE=$(du -sm "$ZIP_FILE" | cut -f1)
 
 echo ""
