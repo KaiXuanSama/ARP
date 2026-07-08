@@ -398,14 +398,16 @@ onUnmounted(() => {
       <!-- 第二层：调用分布 -->
       <div class="charts-row">
         <n-card class="chart-card chart-card-trend" :bordered="true" size="small" title="近 7 天调用分布">
-          <div ref="trendChartRef" class="chart-container chart-container-tall" />
+          <div class="chart-trend-wrap">
+            <div ref="trendChartRef" class="chart-container chart-container-tall" />
+          </div>
         </n-card>
 
         <div class="pie-column">
-          <n-card class="chart-card" :bordered="true" size="small" title="各 Key 调用占比">
+          <n-card class="chart-card chart-card-pie" :bordered="true" size="small" title="各 Key 调用占比">
             <div ref="keyPieRef" class="chart-container chart-container-pie" />
           </n-card>
-          <n-card class="chart-card" :bordered="true" size="small" title="模型调用占比">
+          <n-card class="chart-card chart-card-pie" :bordered="true" size="small" title="模型调用占比">
             <div ref="modelPieRef" class="chart-container chart-container-pie" />
           </n-card>
         </div>
@@ -582,13 +584,21 @@ onUnmounted(() => {
 
 /* ============== 图表区 ============== */
 
+/*
+ * 响应式布局策略:
+ * - 宽屏 (>=1300px): 2 列 —— trend 1.4fr | 右侧列(两饼图横向并排,各占 1fr)
+ * - 中屏 (900~1300px): 2 列 —— trend 1.4fr | 右侧列(两饼图纵向堆叠)
+ *   pie-column 内的 flex-direction 在中屏/窄屏时切换
+ * - 窄屏 (<900px): 1 列垂直堆叠
+ */
 .charts-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
+  align-items: stretch;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 899px) {
   .charts-row {
     grid-template-columns: 1fr;
   }
@@ -598,10 +608,34 @@ onUnmounted(() => {
   border-radius: 8px;
 }
 
-.pie-column {
+/* trend 卡片:让 echarts canvas 在卡片内容区上下居中,
+ * 平衡与饼图卡片的高度差(饼图卡片更短) */
+.chart-trend-wrap {
+  width: 100%;
+  height: 340px;
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.chart-trend-wrap .chart-container {
+  width: 100%;
+  height: 100%;
+}
+
+/* 右侧饼图容器:宽屏横向并排,中屏及以下纵向堆叠 */
+.pie-column {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+@media (max-width: 1299px) {
+  .pie-column {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .chart-container-tall {
