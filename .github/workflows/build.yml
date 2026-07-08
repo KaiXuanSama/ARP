@@ -129,156 +129,135 @@ jobs:
           name: ARP-windows
           path: dist/ARP-windows.zip
 
-  package-macos:
-    needs: build-jar
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
+  # package-macos:  # TODO: 暂时屏蔽，缺少测试环境
+  #   needs: build-jar
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Set up JDK 21
+  #       uses: actions/setup-java@v4
+  #       with:
+  #         java-version: '21'
+  #         distribution: 'temurin'
+  #     - name: Download jar
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: jar
+  #         path: target/
+  #     - name: Compile Swift launcher
+  #       run: |
+  #         cd launcher
+  #         swiftc -O -o ARP -framework Cocoa ArpLauncher.swift
+  #     - name: Generate .icns icon
+  #       run: |
+  #         mkdir -p dist/arp.iconset
+  #         for size in 16 32 64 128 256 512; do
+  #           sips -z $size $size icon.png --out dist/arp.iconset/icon_${size}x${size}.png >/dev/null 2>&1
+  #         done
+  #         for size in 16 32 64 128 256; do
+  #           double=$((size * 2))
+  #           cp dist/arp.iconset/icon_${double}x${double}.png dist/arp.iconset/icon_${size}x${size}@2x.png 2>/dev/null || \
+  #           sips -z $double $double icon.png --out dist/arp.iconset/icon_${size}x${size}@2x.png >/dev/null 2>&1
+  #         done
+  #         sips -z 1024 1024 icon.png --out dist/arp.iconset/icon_512x512@2x.png >/dev/null 2>&1
+  #         iconutil -c icns dist/arp.iconset -o dist/arp.icns
+  #         rm -rf dist/arp.iconset
+  #     - name: Assemble .app bundle
+  #       run: |
+  #         APP="dist/ARP.app"
+  #         mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+  #         cp launcher/ARP "$APP/Contents/MacOS/ARP"
+  #         chmod +x "$APP/Contents/MacOS/ARP"
+  #         JAR=$(find target -name "agentreproxy*.jar" ! -name "*.original" | head -1)
+  #         cp "$JAR" "$APP/Contents/Resources/agentreproxy.jar"
+  #         cp src/main/resources/application.yml "$APP/Contents/Resources/" 2>/dev/null || true
+  #         cp src/main/resources/schema.sql "$APP/Contents/Resources/" 2>/dev/null || true
+  #         cp modelsconfig.json "$APP/Contents/Resources/modelsConfig.json" 2>/dev/null || true
+  #         cp icon.png "$APP/Contents/Resources/arp.png" 2>/dev/null || true
+  #         cp dist/arp.icns "$APP/Contents/Resources/arp.icns" 2>/dev/null || true
+  #         cat > "$APP/Contents/Info.plist" << 'PLIST'
+  #         <?xml version="1.0" encoding="UTF-8"?>
+  #         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+  #         <plist version="1.0">
+  #         <dict>
+  #             <key>CFBundleExecutable</key><string>ARP</string>
+  #             <key>CFBundleIdentifier</key><string>com.kaixuan.arp</string>
+  #             <key>CFBundleName</key><string>ARP</string>
+  #             <key>CFBundleDisplayName</key><string>Agent Reverse Proxy</string>
+  #             <key>CFBundleVersion</key><string>1.0.0</string>
+  #             <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  #             <key>CFBundlePackageType</key><string>APPL</string>
+  #             <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  #             <key>LSMinimumSystemVersion</key><string>10.15</string>
+  #             <key>LSUIElement</key><true/>
+  #             <key>NSHighResolutionCapable</key><true/>
+  #             <key>CFBundleIconFile</key><string>arp</string>
+  #         </dict>
+  #         </plist>
+  #         PLIST
+  #     - name: Bundle JRE (jlink)
+  #       if: ${{ !inputs.skip_jre }}
+  #       run: |
+  #         MODULES="java.base,java.compiler,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.sql.rowset,java.transaction.xa,java.xml,java.xml.crypto,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.jdwp.agent,jdk.management,jdk.naming.dns,jdk.net,jdk.unsupported,jdk.zipfs"
+  #         jlink --add-modules "$MODULES" --strip-debug --no-man-pages --no-header-files --compress zip-6 --output dist/ARP.app/Contents/Resources/jre
+  #     - name: Create zip
+  #       run: |
+  #         cd dist
+  #         xattr -cr ARP.app
+  #         chmod +x ARP.app/Contents/MacOS/ARP
+  #         ditto -c -k --keepParent ARP.app ARP-macos.zip
+  #     - name: Upload artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: ARP-macos
+  #         path: dist/ARP-macos.zip
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-
-      - name: Download jar
-        uses: actions/download-artifact@v4
-        with:
-          name: jar
-          path: target/
-
-      - name: Compile Swift launcher
-        run: |
-          cd launcher
-          swiftc -O -o ARP -framework Cocoa ArpLauncher.swift
-
-      - name: Generate .icns icon
-        run: |
-          mkdir -p dist/arp.iconset
-          for size in 16 32 64 128 256 512; do
-            sips -z $size $size icon.png --out dist/arp.iconset/icon_${size}x${size}.png >/dev/null 2>&1
-          done
-          for size in 16 32 64 128 256; do
-            double=$((size * 2))
-            cp dist/arp.iconset/icon_${double}x${double}.png dist/arp.iconset/icon_${size}x${size}@2x.png 2>/dev/null || \
-            sips -z $double $double icon.png --out dist/arp.iconset/icon_${size}x${size}@2x.png >/dev/null 2>&1
-          done
-          sips -z 1024 1024 icon.png --out dist/arp.iconset/icon_512x512@2x.png >/dev/null 2>&1
-          iconutil -c icns dist/arp.iconset -o dist/arp.icns
-          rm -rf dist/arp.iconset
-
-      - name: Assemble .app bundle
-        run: |
-          APP="dist/ARP.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-
-          cp launcher/ARP "$APP/Contents/MacOS/ARP"
-          chmod +x "$APP/Contents/MacOS/ARP"
-
-          JAR=$(find target -name "agentreproxy*.jar" ! -name "*.original" | head -1)
-          cp "$JAR" "$APP/Contents/Resources/agentreproxy.jar"
-          cp src/main/resources/application.yml "$APP/Contents/Resources/" 2>/dev/null || true
-          cp src/main/resources/schema.sql "$APP/Contents/Resources/" 2>/dev/null || true
-          cp modelsconfig.json "$APP/Contents/Resources/modelsConfig.json" 2>/dev/null || true
-          cp icon.png "$APP/Contents/Resources/arp.png" 2>/dev/null || true
-          cp dist/arp.icns "$APP/Contents/Resources/arp.icns" 2>/dev/null || true
-
-          cat > "$APP/Contents/Info.plist" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key><string>ARP</string>
-              <key>CFBundleIdentifier</key><string>com.kaixuan.arp</string>
-              <key>CFBundleName</key><string>ARP</string>
-              <key>CFBundleDisplayName</key><string>Agent Reverse Proxy</string>
-              <key>CFBundleVersion</key><string>1.0.0</string>
-              <key>CFBundleShortVersionString</key><string>1.0.0</string>
-              <key>CFBundlePackageType</key><string>APPL</string>
-              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-              <key>LSMinimumSystemVersion</key><string>10.15</string>
-              <key>LSUIElement</key><true/>
-              <key>NSHighResolutionCapable</key><true/>
-              <key>CFBundleIconFile</key><string>arp</string>
-          </dict>
-          </plist>
-          PLIST
-
-      - name: Bundle JRE (jlink)
-        if: ${{ !inputs.skip_jre }}
-        run: |
-          MODULES="java.base,java.compiler,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.sql.rowset,java.transaction.xa,java.xml,java.xml.crypto,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.jdwp.agent,jdk.management,jdk.naming.dns,jdk.net,jdk.unsupported,jdk.zipfs"
-          jlink --add-modules "$MODULES" --strip-debug --no-man-pages --no-header-files --compress zip-6 --output dist/ARP.app/Contents/Resources/jre
-
-      - name: Create zip
-        run: |
-          cd dist
-          # 清除隔离属性，防止用户解压后被 Gatekeeper 报"已损坏"
-          xattr -cr ARP.app
-          # 确保可执行权限
-          chmod +x ARP.app/Contents/MacOS/ARP
-          # 使用 ditto 打包（保留 macOS 元数据和权限，比 zip 更可靠）
-          ditto -c -k --keepParent ARP.app ARP-macos.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ARP-macos
-          path: dist/ARP-macos.zip
-
-  package-linux:
-    needs: build-jar
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-
-      - name: Download jar
-        uses: actions/download-artifact@v4
-        with:
-          name: jar
-          path: target/
-
-      - name: Assemble package
-        run: |
-          OUT="dist/ARP-linux"
-          mkdir -p "$OUT"
-
-          JAR=$(find target -name "agentreproxy*.jar" ! -name "*.original" | head -1)
-          cp "$JAR" "$OUT/agentreproxy.jar"
-          cp launcher/arp-linux.sh "$OUT/arp.sh"
-          chmod +x "$OUT/arp.sh"
-          cp src/main/resources/application.yml "$OUT/" 2>/dev/null || true
-          cp src/main/resources/schema.sql "$OUT/" 2>/dev/null || true
-          cp modelsconfig.json "$OUT/modelsConfig.json" 2>/dev/null || true
-          cp icon.png "$OUT/arp.png" 2>/dev/null || true
-
-      - name: Bundle JRE (jlink)
-        if: ${{ !inputs.skip_jre }}
-        run: |
-          MODULES="java.base,java.compiler,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.sql.rowset,java.transaction.xa,java.xml,java.xml.crypto,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.jdwp.agent,jdk.management,jdk.naming.dns,jdk.net,jdk.unsupported,jdk.zipfs"
-          jlink --add-modules "$MODULES" --strip-debug --no-man-pages --no-header-files --compress zip-6 --output dist/ARP-linux/jre
-
-      - name: Create tar.gz
-        run: |
-          cd dist
-          tar czf ARP-linux.tar.gz ARP-linux
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ARP-linux
-          path: dist/ARP-linux.tar.gz
+  # package-linux:  # TODO: 暂时屏蔽，缺少测试环境
+  #   needs: build-jar
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Set up JDK 21
+  #       uses: actions/setup-java@v4
+  #       with:
+  #         java-version: '21'
+  #         distribution: 'temurin'
+  #     - name: Download jar
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: jar
+  #         path: target/
+  #     - name: Assemble package
+  #       run: |
+  #         OUT="dist/ARP-linux"
+  #         mkdir -p "$OUT"
+  #         JAR=$(find target -name "agentreproxy*.jar" ! -name "*.original" | head -1)
+  #         cp "$JAR" "$OUT/agentreproxy.jar"
+  #         cp launcher/arp-linux.sh "$OUT/arp.sh"
+  #         chmod +x "$OUT/arp.sh"
+  #         cp src/main/resources/application.yml "$OUT/" 2>/dev/null || true
+  #         cp src/main/resources/schema.sql "$OUT/" 2>/dev/null || true
+  #         cp modelsconfig.json "$OUT/modelsConfig.json" 2>/dev/null || true
+  #         cp icon.png "$OUT/arp.png" 2>/dev/null || true
+  #     - name: Bundle JRE (jlink)
+  #       if: ${{ !inputs.skip_jre }}
+  #       run: |
+  #         MODULES="java.base,java.compiler,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.sql.rowset,java.transaction.xa,java.xml,java.xml.crypto,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.jdwp.agent,jdk.management,jdk.naming.dns,jdk.net,jdk.unsupported,jdk.zipfs"
+  #         jlink --add-modules "$MODULES" --strip-debug --no-man-pages --no-header-files --compress zip-6 --output dist/ARP-linux/jre
+  #     - name: Create tar.gz
+  #       run: |
+  #         cd dist
+  #         tar czf ARP-linux.tar.gz ARP-linux
+  #     - name: Upload artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: ARP-linux
+  #         path: dist/ARP-linux.tar.gz
 
   # ── Step 3: Create GitHub Release (only on tag push) ──
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [package-windows, package-macos, package-linux]
+    needs: [package-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -294,8 +273,6 @@ jobs:
           prerelease: false
           files: |
             artifacts/ARP-windows/ARP-windows.zip
-            artifacts/ARP-macos/ARP-macos.zip
-            artifacts/ARP-linux/ARP-linux.tar.gz
           body: |
             ## ARP ${{ github.ref_name }}
 
@@ -304,7 +281,5 @@ jobs:
             | 平台 | 文件 | 说明 |
             |---|---|---|
             | Windows | `ARP-windows.zip` | 解压后双击 `ARP.exe`，系统托盘出现图标 |
-            | macOS | `ARP-macos.zip` | 解压后双击 `ARP.app`（首次需右键→打开） |
-            | Linux | `ARP-linux.tar.gz` | 解压后运行 `./arp.sh` |
 
-            所有版本均已捆绑 JRE，无需安装 Java。
+            Windows 版本已捆绑 JRE，无需安装 Java。
