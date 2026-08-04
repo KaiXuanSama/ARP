@@ -111,6 +111,79 @@ public class UpstreamClient {
      .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
      }
 
+    // ============== Anthropic Messages（原生透传） ==============
+
+    /**
+     * 调用上游 Anthropic Messages 端点（流式 SSE 透传），按 accountId 路由
+     * <p>
+     * <strong>上游原生支持 Anthropic 协议</strong>(2026-08 实测确认) —— 本服务不做任何
+     * 协议转换，只做"鉴权换头 + 透传"。请求体/响应体格式与 Anthropic 官方一致。
+     * <p>
+     * <strong>路径前缀陷阱</strong>:Anthropic 端点是 {@code /v1/messages}，
+     * 而 Chat 端点是 {@code /v2/chat/completions} —— <b>前缀不同</b>，
+     * 因此这里用 {@link UpstreamConstants#ANTHROPIC_BASE_URL} 而非 {@code CHAT_BASE_URL}。
+     * <p>
+     * <strong>始终是 SSE</strong>:上游无视请求体里的 {@code stream} 字段，
+     * 一律返回 {@code text/event-stream}。非流式响应由
+     * {@code AnthropicController} 调用 {@code AnthropicStreamAggregator} 聚合后返回。
+     * <p>
+     * 用 {@code exchangeToFlux} 而非 {@code retrieve()}:后者遇上游 4xx 会抛
+     * {@code WebClientResponseException}(不是 {@code ResponseStatusException}),
+     * 最终被 Spring 默认 handler 渲染成 500，下游看不到真实错因。
+     * 这里显式把上游的错误状态码与 body 透传出去。
+     */
+    public Flux<String> postAnthropicMessagesForAccount(Long accountId, Map<String, Object> body) {
+        return resolveAuth(accountId)
+                .flatMapMany(cred -> webClient.post()
+                        .uri(UpstreamConstants.ANTHROPIC_BASE_URL + UpstreamConstants.PATH_ANTHROPIC_MESSAGES)
+                        .headers(h -> applyAuth(h, cred))
+                        .bodyValue(body)
+                        .exchangeToFlux(resp -> {
+                            if (resp.statusCode().isError()) {
+                                // 上游 4xx/5xx：读完整 body 后抛 UpstreamErrorException，
+                                // 由 AnthropicWebExceptionHandler 渲染成 Anthropic 错误格式
+                                return resp.bodyToMono(String.class)
+                                        .defaultIfEmpty("")
+                                        .flatMapMany(errBody -> Flux.error(
+                                                new UpstreamErrorException(
+                                                        resp.statusCode().value(), errBody)));
+                            }
+                            return resp.bodyToFlux(String.class);
+                        })
+                        .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
+    }
+
+    /**
+     * 上游返回错误状态码时抛出，携带原始状态码与响应体
+     * <p>
+     * 让上层能把上游的真实错因（如 {@code 11102 model service info not found}）
+     * 透传给下游，而不是笼统的 500。
+     */
+    public static class UpstreamErrorException extends RuntimeException {
+        private final int statusCode;
+        private final String responseBody;
+
+        public UpstreamErrorException(int statusCode, String responseBody) {
+            super("上游返回 " + statusCode + ": " + abbreviate(responseBody));
+            this.statusCode = statusCode;
+            this.responseBody = responseBody;
+        }
+
+        public int getStatusCode() {
+            return statusCode;
+        }
+
+        public String getResponseBody() {
+            return responseBody;
+        }
+
+        private static String abbreviate(String s) {
+            if (s == null) return "";
+            String t = s.trim();
+            return t.length() > 300 ? t.substring(0, 300) + "..." : t;
+        }
+    }
+
     /**
      * 调用 Chat 补全端点（流式 SSE 透传）
      * <p>
