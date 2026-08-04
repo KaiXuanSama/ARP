@@ -11,6 +11,17 @@ public final class UpstreamConstants {
     /** Billing 端点 Base URL（无 /v2） */
     public static final String BILLING_BASE_URL = "https://copilot.tencent.com";
 
+    /**
+     * Anthropic Messages 端点 Base URL（含 /v1，<b>注意不是 /v2</b>）
+     * <p>
+     * 2026-08 实测：上游原生支持 Anthropic 协议，路径为 {@code /v1/messages}。
+     * 与 Chat 的 {@code /v2/chat/completions} 前缀不同，极易搞混。
+     * 探测结果：{@code /v2/messages}、{@code /messages}、
+     * {@code /anthropic/v1/messages} 全部返回 {@code 404 Route Not Found}，
+     * 只有 {@code /v1/messages} 可用。
+     */
+    public static final String ANTHROPIC_BASE_URL = "https://copilot.tencent.com/v1";
+
     /** 请求超时（秒） */
     public static final int TIMEOUT_SECONDS = 60;
 
@@ -28,6 +39,13 @@ public final class UpstreamConstants {
     public static final String PATH_USER_REQUEST_USAGE = "/billing/meter/get-user-request-usage";
     /** 每日签到（带 /v2 前缀） */
     public static final String PATH_DAILY_CHECKIN = "/v2/billing/meter/daily-checkin";
+
+    /**
+     * Anthropic Messages 路径（拼在 {@link #ANTHROPIC_BASE_URL} 之后）
+     * <p>
+     * 完整 URL：{@code https://copilot.tencent.com/v1/messages}
+     */
+    public static final String PATH_ANTHROPIC_MESSAGES = "/messages";
 
     private UpstreamConstants() {}
 }

@@ -1,11 +1,9 @@
 package com.kaixuan.agentreproxy.config;
 
-import com.kaixuan.agentreproxy.dto.OpenAiErrorResponse;
 import org.springframework.boot.web.reactive.error.ErrorWebExceptionHandler;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
@@ -42,47 +40,109 @@ import java.util.Map;
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class OpenAiWebExceptionHandler implements ErrorWebExceptionHandler {
 
+    /** 共享 ObjectMapper —— 原实现每次异常都 new 一个，属于无谓开销 */
+    private static final com.fasterxml.jackson.databind.ObjectMapper SHARED_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
     @Override
     public Mono<Void> handle(ServerWebExchange exchange, Throwable ex) {
-        // 只处理 ResponseStatusException(OpenAI controller 抛的错误)
+        // 上游错误（Anthropic 端点用 exchangeToFlux 显式抛出）→ 透传上游状态码与错因
+        if (ex instanceof com.kaixuan.agentreproxy.service.UpstreamClient.UpstreamErrorException ue) {
+            return writeError(exchange, resolveStatus(ue.getStatusCode()),
+                    extractUpstreamMessage(ue.getResponseBody(), ue.getStatusCode()));
+        }
+
+        // 只处理 ResponseStatusException(OpenAI / Anthropic controller 抛的错误)
         // 其他异常 fall through(返回空 Mono)给 Spring 默认 handler
         if (!(ex instanceof org.springframework.web.server.ResponseStatusException rse)) {
             return Mono.empty();
         }
 
-        // 状态码 + body
         HttpStatus status = HttpStatus.resolve(rse.getStatusCode().value());
         if (status == null) {
             status = HttpStatus.INTERNAL_SERVER_ERROR;
         }
         String message = rse.getReason() != null ? rse.getReason() : rse.getMessage();
-        OpenAiErrorResponse oa = OpenAiErrorMapper.map(message, status);
-        Map<String, Object> body = oa.toMap();
+        return writeError(exchange, status, message);
+    }
 
-        // 写响应
+    /**
+     * 按请求路径选择错误响应格式并写出
+     * <p>
+     * <strong>为什么要按路径分流</strong>:本处理器按<b>异常类型</b>拦截、不看路径,
+     * 而 Anthropic 端点 {@code /v1/messages} 与 OpenAI 端点同在 {@code /v1} 下。
+     * 若统一渲染成 OpenAI 格式,Anthropic 官方 SDK 会因顶层缺 {@code type} 字段
+     * 而解析失败(它期待 {@code {"type":"error","error":{...}}})。
+     */
+    private Mono<Void> writeError(ServerWebExchange exchange, HttpStatus status, String message) {
+        String path = exchange.getRequest().getPath().value();
+        Map<String, Object> body = isAnthropicPath(path)
+                ? AnthropicErrorMapper.map(message, status)
+                : OpenAiErrorMapper.map(message, status).toMap();
+
         var response = exchange.getResponse();
         response.setStatusCode(status);
-        response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
         // charset=UTF-8 让中文 message 正确编码
         response.getHeaders().set("Content-Type", "application/json;charset=UTF-8");
-        // 关闭 SSE 相关的头部(防止客户端按 SSE 解析)
-        response.getHeaders().remove("Content-Type");
-        response.getHeaders().set("Content-Type", "application/json;charset=UTF-8");
 
-        // 序列化 body —— 用 Mono 异步写
         return Mono.just(body).flatMap(b -> {
             try {
-                byte[] bytes = new com.fasterxml.jackson.databind.ObjectMapper()
-                        .writeValueAsBytes(b);
+                byte[] bytes = SHARED_MAPPER.writeValueAsBytes(b);
                 var buffer = response.bufferFactory().wrap(bytes);
                 return response.writeWith(Mono.just(buffer)).then();
             } catch (Exception e) {
-                // 序列化失败,降级为纯文本
                 byte[] fallback = ("{\"error\":{\"message\":\"序列化失败\",\"type\":\"server_error\",\"code\":\"internal\"}}")
                         .getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 var buffer = response.bufferFactory().wrap(fallback);
                 return response.writeWith(Mono.just(buffer)).then();
             }
         });
+    }
+
+    /** Anthropic 兼容端点路径判定 */
+    private static boolean isAnthropicPath(String path) {
+        return path != null && path.startsWith("/v1/messages");
+    }
+
+    /** 上游状态码 → 本地状态码（无法解析时降级 502，表示上游异常而非本服务异常） */
+    private static HttpStatus resolveStatus(int upstreamStatus) {
+        HttpStatus s = HttpStatus.resolve(upstreamStatus);
+        return s != null ? s : HttpStatus.BAD_GATEWAY;
+    }
+
+    /**
+     * 从上游错误响应中提取可读的错因
+     * <p>
+     * 上游实测有两种形态:
+     * <ul>
+     *   <li>JSON:{@code {"code":11102,"error":"11102:model [x] service info not found",...}}</li>
+     *   <li>HTML:APISIX 网关的 401 页面</li>
+     * </ul>
+     * HTML 形态无法提取有效信息,返回按状态码归纳的通用提示。
+     */
+    private static String extractUpstreamMessage(String rawBody, int statusCode) {
+        if (rawBody == null || rawBody.isBlank()) {
+            return "上游返回 " + statusCode + " 且无响应体";
+        }
+        String trimmed = rawBody.trim();
+        // HTML(网关错误页)→ 不暴露给下游,给通用提示
+        if (trimmed.startsWith("<")) {
+            if (statusCode == 401 || statusCode == 403) {
+                return "上游账号凭证无效或已过期,请在管理面板刷新该账号的 access_token";
+            }
+            return "上游网关返回 " + statusCode;
+        }
+        try {
+            var node = SHARED_MAPPER.readTree(trimmed);
+            for (String field : new String[] { "error", "message", "error_msg" }) {
+                var v = node.get(field);
+                if (v != null && v.isTextual() && !v.asText().isBlank()) {
+                    return "上游错误: " + v.asText();
+                }
+            }
+        } catch (Exception ignored) {
+            // 非 JSON,走下面的截断兜底
+        }
+        return "上游错误: " + (trimmed.length() > 300 ? trimmed.substring(0, 300) + "..." : trimmed);
     }
 }
