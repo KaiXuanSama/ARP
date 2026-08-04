@@ -15,22 +15,26 @@ import java.util.TreeMap;
 /**
  * Anthropic SSE 事件流聚合器 —— 把上游的流式事件合并成一个完整的 {@code Message} 对象
  *
- * <h3>⚠️ 当前未被调用（2026-08）</h3>
- * {@code AnthropicController} 现在<b>只支持流式</b>（非 {@code stream: true} 的请求直接返回 400），
- * 因此本类暂时没有调用方。保留原因：
- * <ul>
- *   <li>非流式支持随时可能重新启用，届时把本类注入回 controller 即可</li>
- *   <li><b>已知未调通</b>：实测聚合后 {@code content} 为空数组（{@code message_start}
- *       能解析出 id/usage，但 {@code content_block_delta} 没被累积）。
- *       重新启用前<b>必须先修这个 bug</b>，不要直接接上就用。</li>
- * </ul>
- *
  * <h3>为什么需要聚合</h3>
  * 上游 {@code copilot.tencent.com/v1/messages} <b>无论请求体里 {@code stream} 是
  * true / false / 缺失，一律返回 {@code text/event-stream}</b>。
  * 而 Anthropic 官方 SDK 的非流式调用（{@code client.messages.create()} 不带 stream）
  * 期待 {@code application/json} + 完整 Message 体，拿到 SSE 会 JSON 解析失败。
  * 因此非流式请求必须由本服务把事件流"收干"再拼成一个 Message 返回。
+ * <p>
+ * 调用方：{@code AnthropicController.messages}（仅非流式分支）。
+ *
+ * <h3>调用方拼接契约（易错点）</h3>
+ * 本类按<b>行</b>解析。调用方把 WebClient 的各个 element 合并时
+ * <b>必须用 {@code String.join("\n", parts)}</b>：
+ * <ul>
+ *   <li>WebClient 解码 SSE 后，每个 element 是一个完整的 data 值（裸 JSON，<b>不带尾部换行</b>）</li>
+ *   <li>若用 {@code join("")}，会得到 {@code {...}{...}{...}} 这种多 JSON 同行形态，
+ *       而 Jackson 的 {@code readTree} 只解析第一个对象就返回 —— 表现为
+ *       {@code message_start} 能读到、但所有 {@code content_block_delta} 静默丢失，
+ *       {@code content} 恒为空数组</li>
+ * </ul>
+ * 该行为已由 {@code AnthropicStreamAggregatorTest} 钉住。
  * <p>
  * <strong>上游实测事件序列</strong>(2026-08 抓包确认):
  * <pre>

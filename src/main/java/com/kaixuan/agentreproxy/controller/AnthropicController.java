@@ -1,6 +1,7 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kaixuan.agentreproxy.service.AnthropicStreamAggregator;
 import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
 import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
 import com.kaixuan.agentreproxy.service.SettingsService;
@@ -38,19 +39,22 @@ import java.util.Map;
  *   <li><b>选号</b>：复用 {@link SettingsService#resolveAccountForApiKey} 的
  *       per-key consumption 路由，与 OpenAI 端点完全一致</li>
  *   <li><b>模型白名单校验</b>：与 OpenAI 端点同语义（null 放行 / 空数组全拒 / 白名单严格匹配）</li>
- *   <li><b>流式透传</b>：上游本身就是标准 Anthropic SSE，零加工直通</li>
+ *   <li><b>流式与非流式适配</b>：见下</li>
  * </ol>
  *
- * <h3>仅支持流式（有意为之）</h3>
- * 本端点要求请求体带 {@code stream: true}，否则返回 400。
- * 与 {@code /v1/chat/completions} 强制 {@code stream=true} 是同一种取舍。
+ * <h3>非流式适配（本控制器存在的主要理由）</h3>
+ * 上游<b>无视请求体里的 {@code stream} 字段</b>，无论 true / false / 缺失，
+ * 一律返回 {@code text/event-stream}。而 Anthropic SDK 的非流式调用
+ * （{@code client.messages.create()} 不带 stream）期待 {@code application/json}
+ * + 完整 Message 体，直接透传会让 SDK JSON 解析崩溃。因此：
+ * <ul>
+ *   <li>{@code stream: true} → 原样透传上游 SSE（零加工，最省开销）</li>
+ *   <li>否则 → 收干整个流，用 {@link AnthropicStreamAggregator} 聚合成
+ *       完整 Message 后以 JSON 返回</li>
+ * </ul>
  * <p>
- * 背景：上游<b>无视请求体里的 {@code stream} 字段</b>，无论 true / false / 缺失，
- * 一律返回 {@code text/event-stream}。若要支持非流式，就必須在本服务内
- * “收干整个事件流再拼成完整 Message”。该聚合逻辑已实现于
- * {@code AnthropicStreamAggregator}，但尚未调通（聚合后 {@code content}
- * 为空数组），而实际使用场景（Claude Code / SDK 流式对话）几乎总是流式，
- * 故暂不投入。需要时再启用聚合器即可。
+ * ❗ 非流式拼接必須用 {@code String.join("\n", parts)}：用 {@code ""} 拼会产生
+ * {@code {...}{...}} 这种多 JSON 同行形态，Jackson 只解析第一个，导致 content 恒空。
  *
  * <h3>计费差异（重要）</h3>
  * 上游 Anthropic 端点的 {@code message_delta.usage} <b>只有 token 数，没有
@@ -74,17 +78,20 @@ public class AnthropicController {
     private final SettingsService settingsService;
     private final ChatUsageRefreshScheduler usageRefreshScheduler;
     private final DownstreamApiKeyService downstreamApiKeyService;
+    private final AnthropicStreamAggregator aggregator;
     private final ObjectMapper objectMapper;
 
     public AnthropicController(UpstreamClient upstream,
             SettingsService settingsService,
             ChatUsageRefreshScheduler usageRefreshScheduler,
             DownstreamApiKeyService downstreamApiKeyService,
+            AnthropicStreamAggregator aggregator,
             ObjectMapper objectMapper) {
         this.upstream = upstream;
         this.settingsService = settingsService;
         this.usageRefreshScheduler = usageRefreshScheduler;
         this.downstreamApiKeyService = downstreamApiKeyService;
+        this.aggregator = aggregator;
         this.objectMapper = objectMapper;
     }
 
@@ -124,15 +131,10 @@ public class AnthropicController {
                     "messages 不能为空"));
         }
 
-        // ---- 只支持流式（与 OpenAI 端点同样的取舍）----
-        // 不像 OpenAI 端点那样静默强制改写 stream=true，而是显式报错：
-        // Anthropic SDK 的非流式调用会把响应当成完整 Message 解析，
-        // 静默返回 SSE 会让 SDK 报一个难以理解的 JSON 解析错误，
-        // 不如直接告知“本端点需要 stream: true”。
-        if (!Boolean.TRUE.equals(body.get("stream"))) {
-            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "本端点目前仅支持流式调用，请在请求体中设置 stream: true"));
-        }
+        // ---- 是否流式：只有显式 true 才透传 SSE，否则聚合为完整 Message ----
+        // 上游无视请求体里的 stream 字段（一律返 SSE），所以“非流式”完全由
+        // 本服务内部实现：收干整个事件流 → AnthropicStreamAggregator 拼成 Message。
+        boolean wantStream = Boolean.TRUE.equals(body.get("stream"));
 
         return settingsService.resolveAccountForApiKey(credential)
                 .onErrorMap(IllegalArgumentException.class,
@@ -154,15 +156,37 @@ public class AnthropicController {
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
 
-                    // 流式透传：上游本身就是标准 Anthropic SSE，本服务零加工
+                    // 上游始终返回 SSE，这里按下游意图决定透传还是聚合
                     Flux<String> upstreamFlux = upstream
                             .postAnthropicMessagesForAccount(ctx.accountId(), body)
                             .doOnNext(element -> interceptMessageChunk(
                                     element, ctx.keyId(), ctx.accountId()));
 
-                    return Mono.just(ResponseEntity.ok()
-                            .contentType(MediaType.TEXT_EVENT_STREAM)
-                            .body(upstreamFlux));
+                    if (wantStream) {
+                        // 流式：原样透传，上游本身就是标准 Anthropic SSE，本服务零加工
+                        return Mono.just(ResponseEntity.ok()
+                                .contentType(MediaType.TEXT_EVENT_STREAM)
+                                .body(upstreamFlux));
+                    }
+
+                    // 非流式：收干全流 → 聚合成完整 Message → JSON 返回
+                    //
+                    // ❗ 必須用 "\n" 而不是 "" 拼接：WebClient 解码 SSE 后，每个 element 是
+                    //   一个完整的 data 值（裸 JSON，不带尾部换行）。用 "" 拼会得到
+                    //   {...}{...}{...} 这种“多个 JSON 挤在一行”的形态，而 Jackson 的
+                    //   readTree 只会解析第一个对象就返回 —— 结果 message_start 能读到，
+                    //   但所有 content_block_delta 全部丢失，content 恒为空数组。
+                    //   这个 bug 已由 AnthropicStreamAggregatorTest 钉住。
+                    return upstreamFlux
+                            .collectList()
+                            .map(parts -> {
+                                String full = String.join("\n", parts);
+                                Map<String, Object> message =
+                                        aggregator.aggregate(full, requestedModel);
+                                return ResponseEntity.ok()
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .body(message);
+                            });
                 });
     }
 
