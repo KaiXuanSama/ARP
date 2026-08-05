@@ -42,4 +42,15 @@ models:
 #       [chunk摘要]  delta 里所有非空字段 —— 一眼看出思维链落在哪个字段
 custom:
   chunk-log:
-    enabled: false
+    enabled: true
+
+  # Anthropic 端点(/v1/messages)的上游路径选择
+  #   true  = 桥接模式(默认):请求转 OpenAI → 调 /v2/chat/completions → 响应翻译回 Anthropic
+  #           上游 OpenAI 端点返回 usage.credit,因此积分统计与 credit_limit 正常工作
+  #   false = 直连模式:直接调上游 /v1/messages,零转换
+  #           协议原生无转换风险,但上游不返回 credit,无法计费
+  #
+  # 背景:Claude Code 硬编码走 Anthropic 协议,而上游 Anthropic 端点实测不返回 credit,
+  #      导致该场景完全无法统计消耗。桥接模式是为解决这个问题引入的。
+  anthropic:
+    bridge-via-openai: true
