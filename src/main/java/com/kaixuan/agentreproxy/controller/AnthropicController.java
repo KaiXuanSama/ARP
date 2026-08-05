@@ -280,6 +280,17 @@ public class AnthropicController {
                     "请求体转换失败: " + e.getMessage()));
         }
 
+        // 桥接模式下真正发给上游的是转换后的 OpenAI 体 —— 排查时必须能看到它，
+        // 否则只看到 Anthropic 侧的替换结果，无法确认转换过程有没有把内容改回去
+        if (chunkLogEnabled) {
+            try {
+                String json = objectMapper.writeValueAsString(openAiBody);
+                log.info("[请求体-桥接后-发给上游OpenAI] 总长={} 字符\n{}", json.length(), json);
+            } catch (Exception e) {
+                log.warn("[请求体-桥接后] 序列化失败: {}", e.getMessage());
+            }
+        }
+
         // 有状态转换器：每个请求一个实例
         OpenAiToAnthropicStreamConverter converter =
                 new OpenAiToAnthropicStreamConverter(objectMapper, requestedModel);

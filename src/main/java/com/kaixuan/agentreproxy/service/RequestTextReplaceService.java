@@ -50,6 +50,17 @@ public class RequestTextReplaceService {
     private final SettingsService settingsService;
     private final ObjectMapper objectMapper;
 
+    /**
+     * 是否打印替换前后的完整请求体（排查用，默认关闭）
+     * <p>
+     * 与 chunk 日志<b>共用同一个开关</b> {@code custom.chunk-log.enabled}，
+     * 一次打开就能把“请求发什么 → 替换成什么 → 上游回什么”一整条链路看完。
+     * <p>
+     * <b>日志量很大</b>（单个请求体可能上万字符），仅排查时临时开启。
+     */
+    @org.springframework.beans.factory.annotation.Value("${custom.chunk-log.enabled:false}")
+    private boolean requestLogEnabled;
+
     public RequestTextReplaceService(SettingsService settingsService, ObjectMapper objectMapper) {
         this.settingsService = settingsService;
         this.objectMapper = objectMapper;
@@ -65,8 +76,12 @@ public class RequestTextReplaceService {
     public int applyToOpenAiBody(Map<String, Object> body) {
         List<CompiledRule> rules = loadRules();
         if (rules.isEmpty() || body == null) {
+            // 即使没规则也打印原始体 —— 排查时需要知道“到底发了什么”，
+            // 而不只是“改了什么”。没规则时不打印“替换后”，避免重复刷屏。
+            logBody("OpenAI", "原始（无生效规则，未做任何替换）", body);
             return 0;
         }
+        logBody("OpenAI", "替换前", body);
         int count = 0;
 
         // messages[].content
@@ -112,6 +127,9 @@ public class RequestTextReplaceService {
         }
         if (count > 0) {
             log.info("[文本替换] OpenAI 请求体共替换 {} 处", count);
+            logBody("OpenAI", "替换后", body);
+        } else {
+            log.debug("[文本替换] OpenAI 请求体无命中（生效规则 {} 条）", rules.size());
         }
         return count;
     }
@@ -130,8 +148,10 @@ public class RequestTextReplaceService {
     public int applyToAnthropicBody(Map<String, Object> body) {
         List<CompiledRule> rules = loadRules();
         if (rules.isEmpty() || body == null) {
+            logBody("Anthropic", "原始（无生效规则，未做任何替换）", body);
             return 0;
         }
+        logBody("Anthropic", "替换前", body);
         int count = 0;
 
         // 顶层 system
@@ -188,8 +208,120 @@ public class RequestTextReplaceService {
         }
         if (count > 0) {
             log.info("[文本替换] Anthropic 请求体共替换 {} 处", count);
+            logBody("Anthropic", "替换后", body);
+        } else {
+            log.debug("[文本替换] Anthropic 请求体无命中（生效规则 {} 条）", rules.size());
         }
         return count;
+    }
+
+    /**
+     * 打印完整请求体（排查用）
+     * <p>
+     * 只在 {@code custom.chunk-log.enabled=true} 时输出。为了便于肉眼对比，
+     * 除了完整 JSON，还单独把 <b>system 与首条 user 消息</b>抽出来展示 ——
+     * 实测中触发上游内容检测的内容基本都在这两处，而完整 JSON 往往上万字符、
+     * 在日志里很难直接看出差异。
+     */
+    private void logBody(String protocol, String stage, Map<String, Object> body) {
+        if (!requestLogEnabled || body == null) {
+            return;
+        }
+        try {
+            String json = objectMapper.writeValueAsString(body);
+            log.info("[请求体-{}-{}] 总长={} 字符\n{}", protocol, stage, json.length(), json);
+            logKeyFields(protocol, stage, body);
+        } catch (Exception e) {
+            log.warn("[请求体-{}-{}] 序列化失败: {}", protocol, stage, e.getMessage());
+        }
+    }
+
+    /** 抽出 system / 首条 user 单独展示，方便对比替换效果 */
+    @SuppressWarnings("unchecked")
+    private void logKeyFields(String protocol, String stage, Map<String, Object> body) {
+        // Anthropic 的顶层 system
+        Object topSystem = body.get("system");
+        if (topSystem instanceof String s) {
+            log.info("[请求体-{}-{}] system(顶层, {} 字符): {}",
+                    protocol, stage, s.length(), abbreviate(s));
+        } else if (topSystem instanceof List<?> blocks) {
+            StringBuilder sb = new StringBuilder();
+            for (Object b : blocks) {
+                if (b instanceof Map<?, ?> m && m.get("text") instanceof String t) {
+                    sb.append(t);
+                }
+            }
+            log.info("[请求体-{}-{}] system(顶层块数组, {} 字符): {}",
+                    protocol, stage, sb.length(), abbreviate(sb.toString()));
+        }
+
+        // messages 里的 system / 首条 user
+        Object msgs = body.get("messages");
+        if (!(msgs instanceof List<?> list)) {
+            return;
+        }
+        boolean userLogged = false;
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> m)) {
+                continue;
+            }
+            Map<String, Object> msg = (Map<String, Object>) m;
+            String role = msg.get("role") instanceof String r ? r : "";
+            String text = flattenToText(msg.get("content"));
+            if ("system".equals(role)) {
+                log.info("[请求体-{}-{}] messages.system ({} 字符): {}",
+                        protocol, stage, text.length(), abbreviate(text));
+            } else if ("user".equals(role) && !userLogged) {
+                log.info("[请求体-{}-{}] messages.user首条 ({} 字符): {}",
+                        protocol, stage, text.length(), abbreviate(text));
+                userLogged = true;
+            }
+        }
+    }
+
+    /** 长文本截断：头尾各留一段（触发词通常在开头，但尾部也可能有线索） */
+    private static String abbreviate(String s) {
+        if (s == null) {
+            return "";
+        }
+        final int head = 500;
+        final int tail = 200;
+        if (s.length() <= head + tail) {
+            return s;
+        }
+        return s.substring(0, head)
+                + "\n  ...(省略 " + (s.length() - head - tail) + " 字符)...\n  "
+                + s.substring(s.length() - tail);
+    }
+
+    /**
+     * 把 content 拍平成纯文本（仅用于日志展示）
+     * <p>
+     * content 可能是字符串，也可能是 Anthropic 的块数组
+     * {@code [{type:"text", text:"..."}]}。
+     */
+    private static String flattenToText(Object content) {
+        if (content == null) {
+            return "";
+        }
+        if (content instanceof String s) {
+            return s;
+        }
+        if (content instanceof List<?> list) {
+            StringBuilder sb = new StringBuilder();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> m) {
+                    Object t = m.get("text");
+                    if (t instanceof String s) {
+                        sb.append(s);
+                    }
+                } else if (item instanceof String s) {
+                    sb.append(s);
+                }
+            }
+            return sb.toString();
+        }
+        return String.valueOf(content);
     }
 
     /** 处理 content 块数组里的 text 字段 */
