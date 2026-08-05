@@ -8,6 +8,7 @@ import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -80,6 +81,14 @@ public class AnthropicController {
     private final DownstreamApiKeyService downstreamApiKeyService;
     private final AnthropicStreamAggregator aggregator;
     private final ObjectMapper objectMapper;
+
+    /**
+     * 是否打印每个 chunk 的原文（排查用），与 {@code OpenAiController} 共用同一开关
+     * <p>
+     * 默认 {@code false}。开启：{@code --custom.chunk-log.enabled=true}
+     */
+    @Value("${custom.chunk-log.enabled:false}")
+    private boolean chunkLogEnabled;
 
     public AnthropicController(UpstreamClient upstream,
             SettingsService settingsService,
@@ -210,6 +219,12 @@ public class AnthropicController {
     private void interceptMessageChunk(String element, Long keyId, Long accountId) {
         if (element == null || element.isBlank()) {
             return;
+        }
+        // 原始 element 全量打印（排查用）—— 与 OpenAI 端点共用 custom.chunk-log.enabled 开关，
+        // 便于把两个端点的 chunk 放在同一份日志里对照
+        if (chunkLogEnabled) {
+            log.info("[Anthropic chunk原文] keyId={} accountId={} len={} >>>{}<<<",
+                    keyId, accountId, element.length(), element);
         }
         try {
             for (String line : element.split("\n")) {

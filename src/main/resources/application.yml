@@ -29,3 +29,17 @@ server:
 models:
   config:
     path: ./modelsConfig.json
+
+# 排查开关:打印 /v1/chat/completions 与 /v1/messages 的每个 SSE chunk 原文
+#   - 默认 false;一次对话动辄上百个 chunk,开启后日志量很大,仅排查时临时打开
+#   - 注意:不能挂在 spring 内置的 debug 顶层属性下(它是 boolean,会绑定冲突),
+#     因此自定义前缀用 custom.*
+#   - 临时开启(无需改本文件):
+#       .\mvnw.cmd spring-boot:run "-Dspring-boot.run.arguments=--custom.chunk-log.enabled=true"
+#       java -jar app.jar --custom.chunk-log.enabled=true
+#   - 输出两类行:
+#       [chunk原文]  完整 element(未经任何处理)
+#       [chunk摘要]  delta 里所有非空字段 —— 一眼看出思维链落在哪个字段
+custom:
+  chunk-log:
+    enabled: false
