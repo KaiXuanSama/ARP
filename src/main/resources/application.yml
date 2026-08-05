@@ -42,7 +42,7 @@ models:
 #       [chunk摘要]  delta 里所有非空字段 —— 一眼看出思维链落在哪个字段
 custom:
   chunk-log:
-    enabled: true
+    enabled: false
 
   # Anthropic 端点(/v1/messages)的上游路径选择
   #   true  = 桥接模式(默认):请求转 OpenAI → 调 /v2/chat/completions → 响应翻译回 Anthropic
