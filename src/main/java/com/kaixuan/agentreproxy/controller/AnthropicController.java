@@ -6,6 +6,7 @@ import com.kaixuan.agentreproxy.service.AnthropicStreamAggregator;
 import com.kaixuan.agentreproxy.service.AnthropicToOpenAiRequestConverter;
 import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
 import com.kaixuan.agentreproxy.service.OpenAiToAnthropicStreamConverter;
+import com.kaixuan.agentreproxy.service.RequestTextReplaceService;
 import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
@@ -96,6 +97,7 @@ public class AnthropicController {
     private final DownstreamApiKeyService downstreamApiKeyService;
     private final AnthropicStreamAggregator aggregator;
     private final AnthropicToOpenAiRequestConverter requestConverter;
+    private final RequestTextReplaceService textReplaceService;
     private final ObjectMapper objectMapper;
 
     /**
@@ -125,6 +127,7 @@ public class AnthropicController {
             DownstreamApiKeyService downstreamApiKeyService,
             AnthropicStreamAggregator aggregator,
             AnthropicToOpenAiRequestConverter requestConverter,
+            RequestTextReplaceService textReplaceService,
             ObjectMapper objectMapper) {
         this.upstream = upstream;
         this.settingsService = settingsService;
@@ -132,6 +135,7 @@ public class AnthropicController {
         this.downstreamApiKeyService = downstreamApiKeyService;
         this.aggregator = aggregator;
         this.requestConverter = requestConverter;
+        this.textReplaceService = textReplaceService;
         this.objectMapper = objectMapper;
     }
 
@@ -195,6 +199,11 @@ public class AnthropicController {
                     // 鉴权通过 → 累加 call_count + 触发积分刷新（两者内部都不抛异常）
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
+
+                    // 按用户配置的规则做文本替换（未配置时为空操作）。
+                    // 在协议转换之前做 —— 规则按 Anthropic 结构定位字段，
+                    // 与后续走桥接还是直连无关。
+                    textReplaceService.applyToAnthropicBody(body);
 
                     // ============ 两条上游路径，由 bridgeViaOpenAi 开关决定 ============
                     // A) 桥接模式（默认）：请求转 OpenAI → 上游 → 响应翻译回 Anthropic

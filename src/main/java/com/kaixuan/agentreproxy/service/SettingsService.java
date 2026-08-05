@@ -607,6 +607,32 @@ public class SettingsService {
      * @param key   app_settings.key（主键）
      * @param value 任意可序列化对象
      */
+    /**
+     * 保存请求文本替换规则 — {@code request.textReplace}
+     * <p>
+     * 校验由 {@link RequestTextReplaceService#validate} 完成（正则合法性、长度上限、
+     * scope 取值等），校验不过直接抛异常拒绝保存，避免脏规则入库后在 chat 时才炸。
+     * <p>
+     * <strong>规则用途完全由使用者决定</strong>：本服务不内置任何规则，也不限制规则内容。
+     * 使用者需自行确保所配规则符合上游服务条款与当地法规。
+     *
+     * @param req      规则配置
+     * @param validator 校验器（由 controller 注入，避免本类与替换引擎循环依赖）
+     * @return 更新后的设置响应
+     */
+    public AppSettingResponse updateTextReplaceSetting(
+            com.kaixuan.agentreproxy.dto.TextReplaceSettingRequest req,
+            java.util.function.Consumer<com.kaixuan.agentreproxy.dto.TextReplaceSettingRequest> validator) {
+        if (validator != null) {
+            validator.accept(req);
+        }
+        updateByKey(KEY_REQUEST_TEXT_REPLACE, req);
+        return getOne(KEY_REQUEST_TEXT_REPLACE).orElse(null);
+    }
+
+    /** app_settings key —— 请求文本替换规则 */
+    public static final String KEY_REQUEST_TEXT_REPLACE = "request.textReplace";
+
     private void updateByKey(String key, Object value) {
         if (key == null || key.isBlank()) {
             throw new IllegalArgumentException("key 不能为空");

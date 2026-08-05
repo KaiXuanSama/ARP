@@ -14,7 +14,16 @@
  * 每个卡片独立保存，不影响其他设置。
  */
 import { computed, onMounted, ref } from 'vue'
-import { NSwitch, NTimePicker, NButton, NSpace, NInput, useMessage } from 'naive-ui'
+import {
+  NSwitch,
+  NTimePicker,
+  NButton,
+  NSpace,
+  NInput,
+  NSelect,
+  NCheckbox,
+  useMessage,
+} from 'naive-ui'
 import { authFetch } from '../utils/auth'
 
 const message = useMessage()
@@ -152,6 +161,28 @@ async function loadFromServer(): Promise<void> {
       currentUsername.value = (adminItem.value as Record<string, unknown>).username as string ?? ''
     }
 
+    // 请求文本替换卡片
+    const replaceItem = items.find((it) => it.key === TEXT_REPLACE_KEY)
+    if (replaceItem && replaceItem.value && typeof replaceItem.value === 'object') {
+      const rv = replaceItem.value as Record<string, unknown>
+      replaceEnabled.value = rv.enabled === true
+      const rules = rv.rules
+      if (Array.isArray(rules)) {
+        replaceRules.value = rules.map((r) => {
+          const o = (r ?? {}) as Record<string, unknown>
+          return {
+            name: (o.name as string) ?? '',
+            pattern: (o.pattern as string) ?? '',
+            replacement: (o.replacement as string) ?? '',
+            regex: o.regex === true,
+            caseSensitive: o.caseSensitive === true,
+            scope: (o.scope as string) ?? 'all_messages',
+            enabled: o.enabled !== false,
+          }
+        })
+      }
+    }
+
     // 定时签到卡片
     const scheduleItem = items.find((it) => it.key === SCHEDULE_KEY)
     if (!scheduleItem) {
@@ -233,6 +264,142 @@ function hHmmStringToMs(hhmm: string): number {
   const d = new Date()
   d.setHours(h, m, 0, 0)
   return d.getTime()
+}
+
+
+// ===== 请求文本替换设置块 =====
+
+/** app_settings 中的 key */
+const TEXT_REPLACE_KEY = 'request.textReplace'
+
+/** 单条规则的前端形态 */
+interface ReplaceRule {
+  name: string
+  pattern: string
+  replacement: string
+  regex: boolean
+  caseSensitive: boolean
+  scope: string
+  enabled: boolean
+}
+
+/** 总开关 */
+const replaceEnabled = ref(false)
+/** 规则列表 */
+const replaceRules = ref<ReplaceRule[]>([])
+/** 保存状态 */
+const savingReplace = ref(false)
+
+/** 生效范围下拉项 */
+const scopeOptions = [
+  { label: '所有消息', value: 'all_messages' },
+  { label: '仅 system 消息', value: 'system_only' },
+  { label: '仅 user 消息', value: 'user_only' },
+  { label: '仅工具描述', value: 'tool_descriptions' },
+  { label: '消息 + 工具描述', value: 'messages_and_tools' },
+]
+
+/** 添加一条空规则 */
+function addRule(): void {
+  replaceRules.value.push({
+    name: '',
+    pattern: '',
+    replacement: '',
+    regex: false,
+    caseSensitive: false,
+    scope: 'all_messages',
+    enabled: true,
+  })
+}
+
+/** 删除指定规则 */
+function removeRule(idx: number): void {
+  replaceRules.value.splice(idx, 1)
+}
+
+/**
+ * 保存规则 — PUT /api/settings/request/text-replace
+ * <p>
+ * 后端会校验正则合法性、长度上限与 scope 取值，不合法直接拒绝保存。
+ */
+async function saveTextReplace(): Promise<void> {
+  if (savingReplace.value) return
+
+  // 前置校验：匹配内容不能为空
+  const emptyIdx = replaceRules.value.findIndex((r) => !r.pattern.trim())
+  if (emptyIdx >= 0) {
+    message.warning(`第 ${emptyIdx + 1} 条规则的「匹配内容」不能为空`)
+    return
+  }
+
+  savingReplace.value = true
+  try {
+    const res = await authFetch('/api/settings/request/text-replace', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: replaceEnabled.value,
+        rules: replaceRules.value,
+      }),
+    })
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}))
+      throw new Error(errBody?.message || `请求失败: ${res.status}`)
+    }
+    await res.json().catch(() => null)
+    message.success('替换规则已保存')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(`保存失败: ${msg}`)
+  } finally {
+    savingReplace.value = false
+  }
+}
+
+// ----- 预览（仅本机执行，不落库、不发上游）-----
+
+const showPreview = ref(false)
+const previewText = ref('')
+const previewScope = ref('system')
+const previewResult = ref<string | null>(null)
+const previewCount = ref(0)
+const previewActiveRules = ref(0)
+const previewing = ref(false)
+
+const previewScopeOptions = [
+  { label: 'system 消息', value: 'system' },
+  { label: 'user 消息', value: 'user' },
+  { label: '工具描述', value: 'tool_desc' },
+]
+
+async function runPreview(): Promise<void> {
+  if (previewing.value) return
+  previewing.value = true
+  try {
+    const res = await authFetch('/api/settings/request/text-replace/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rules: { enabled: replaceEnabled.value, rules: replaceRules.value },
+        sampleText: previewText.value,
+        scope: previewScope.value,
+      }),
+    })
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}))
+      throw new Error(errBody?.message || `请求失败: ${res.status}`)
+    }
+    const body = await res.json()
+    const d = body?.data ?? {}
+    previewResult.value = d.result ?? ''
+    previewCount.value = d.replaceCount ?? 0
+    previewActiveRules.value = d.activeRules ?? 0
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(`预览失败: ${msg}`)
+  } finally {
+    previewing.value = false
+  }
 }
 
 onMounted(async () => {
@@ -356,6 +523,135 @@ onMounted(async () => {
         </n-space>
       </div>
     </div>
+  
+    <!-- ========== 请求文本替换卡片 ========== -->
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">请求文本替换</h3>
+        <p class="card-desc">
+          在请求发往上游<strong>之前</strong>，按规则替换请求体中的文本。
+          规则完全由你自行配置，服务不内置任何规则。
+          常见用途：内部代号脱敏、术语统一、兼容性适配。
+        </p>
+      </div>
+      <div class="card-body">
+        <div class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">启用替换</span>
+          <div class="setting-row-input">
+            <n-switch v-model:value="replaceEnabled" />
+            <span class="setting-hint">关闭后所有规则暂停生效，但配置会保留</span>
+          </div>
+        </div>
+
+        <div v-if="replaceRules.length === 0" class="empty-rules">
+          还没有规则。点击下方「添加规则」开始配置。
+        </div>
+
+        <div v-for="(rule, idx) in replaceRules" :key="idx" class="rule-item">
+          <div class="rule-item-head">
+            <n-input
+              v-model:value="rule.name"
+              placeholder="规则名（便于识别）"
+              size="small"
+              style="max-width: 200px"
+            />
+            <n-space :size="8" align="center">
+              <n-switch v-model:value="rule.enabled" size="small" />
+              <n-button size="tiny" quaternary type="error" @click="removeRule(idx)">
+                删除
+              </n-button>
+            </n-space>
+          </div>
+
+          <div class="rule-item-body">
+            <div class="rule-field">
+              <label>匹配内容</label>
+              <n-input
+                v-model:value="rule.pattern"
+                placeholder="要查找的文本或正则"
+                size="small"
+              />
+            </div>
+            <div class="rule-field">
+              <label>替换为</label>
+              <n-input
+                v-model:value="rule.replacement"
+                placeholder="留空表示删除匹配内容"
+                size="small"
+              />
+            </div>
+            <div class="rule-field">
+              <label>生效范围</label>
+              <n-select
+                v-model:value="rule.scope"
+                :options="scopeOptions"
+                size="small"
+              />
+            </div>
+            <div class="rule-field rule-field-checks">
+              <n-checkbox v-model:checked="rule.regex" size="small">正则匹配</n-checkbox>
+              <n-checkbox v-model:checked="rule.caseSensitive" size="small">
+                区分大小写
+              </n-checkbox>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <n-space :size="10">
+            <n-button size="small" @click="addRule">添加规则</n-button>
+            <n-button size="small" @click="showPreview = !showPreview">
+              {{ showPreview ? '收起预览' : '效果预览' }}
+            </n-button>
+          </n-space>
+        </div>
+
+        <!-- 预览区：仅本机执行，不落库、不发上游 -->
+        <div v-if="showPreview" class="preview-box">
+          <div class="setting-row">
+            <span class="setting-row-label setting-row-label-fixed">样例文本</span>
+            <div class="setting-row-input">
+              <n-input
+                v-model:value="previewText"
+                type="textarea"
+                :rows="3"
+                placeholder="粘贴一段文本，看看规则会怎么改"
+              />
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="setting-row-label setting-row-label-fixed">模拟位置</span>
+            <div class="setting-row-input">
+              <n-select
+                v-model:value="previewScope"
+                :options="previewScopeOptions"
+                size="small"
+                style="max-width: 200px"
+              />
+              <n-button size="small" :loading="previewing" @click="runPreview">
+                执行预览
+              </n-button>
+            </div>
+          </div>
+          <div v-if="previewResult !== null" class="preview-result">
+            <div class="preview-result-meta">
+              命中 {{ previewCount }} 处 · 生效规则 {{ previewActiveRules }} 条
+            </div>
+            <pre class="preview-result-text">{{ previewResult }}</pre>
+          </div>
+        </div>
+
+        <div class="setting-row setting-row-actions">
+          <n-button
+            type="primary"
+            :loading="savingReplace"
+            @click="saveTextReplace"
+          >
+            保存规则
+          </n-button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -451,5 +747,93 @@ onMounted(async () => {
  */
 .card-footer {
   padding: 8px 20px 12px;
+}
+
+.setting-hint {
+  margin-left: 10px;
+  font-size: 12px;
+  color: #999;
+}
+
+.empty-rules {
+  padding: 16px;
+  text-align: center;
+  color: #999;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.02);
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.rule-item {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: rgba(0, 0, 0, 0.01);
+}
+
+.rule-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.rule-item-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.rule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rule-field label {
+  font-size: 12px;
+  color: #666;
+}
+
+.rule-field-checks {
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  padding-top: 18px;
+}
+
+.preview-box {
+  border: 1px dashed rgba(0, 0, 0, 0.15);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 12px 0;
+}
+
+.preview-result {
+  margin-top: 10px;
+}
+
+.preview-result-meta {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 6px;
+}
+
+.preview-result-text {
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.setting-row-actions {
+  margin-top: 12px;
 }
 </style>

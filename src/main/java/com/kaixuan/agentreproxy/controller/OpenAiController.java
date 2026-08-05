@@ -5,6 +5,7 @@ import com.kaixuan.agentreproxy.model.ModelConfig;
 import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
 import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
+import com.kaixuan.agentreproxy.service.RequestTextReplaceService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
 import org.slf4j.Logger;
@@ -58,6 +59,7 @@ public class OpenAiController {
     private final SettingsService settingsService;
     private final ChatUsageRefreshScheduler usageRefreshScheduler;
     private final DownstreamApiKeyService downstreamApiKeyService;
+    private final RequestTextReplaceService textReplaceService;
     private final ObjectMapper objectMapper;
 
     /**
@@ -86,12 +88,14 @@ public class OpenAiController {
             SettingsService settingsService,
             ChatUsageRefreshScheduler usageRefreshScheduler,
             DownstreamApiKeyService downstreamApiKeyService,
+            RequestTextReplaceService textReplaceService,
             ObjectMapper objectMapper) {
         this.upstream = upstream;
         this.modelsConfig = modelsConfig;
         this.settingsService = settingsService;
         this.usageRefreshScheduler = usageRefreshScheduler;
         this.downstreamApiKeyService = downstreamApiKeyService;
+        this.textReplaceService = textReplaceService;
         this.objectMapper = objectMapper;
     }
 
@@ -150,6 +154,8 @@ public class OpenAiController {
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
                     usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
+                    // 按用户配置的规则做文本替换（未配置时为空操作）
+                    textReplaceService.applyToOpenAiBody(body);
                     return upstream.postChatStreamForAccount(ctx.accountId(), body)
                             // 侧路拦截:每条 SSE 文本 element 都检查一次
                             // CodeBuddy 的"结算 chunk"在 [DONE] 之前带 usage 字段
