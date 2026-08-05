@@ -1,5 +1,17 @@
-{"properties": [{
-  "name": "models.config.path",
-  "type": "java.lang.String",
-  "description": "A description for 'models.config.path'"
-}]}
+{"properties": [
+  {
+    "name": "models.config.path",
+    "type": "java.lang.String",
+    "description": "A description for 'models.config.path'"
+  },
+  {
+    "name": "custom.chunk-log.enabled",
+    "type": "java.lang.String",
+    "description": "A description for 'custom.chunk-log.enabled'"
+  },
+  {
+    "name": "custom.anthropic.bridge-via-openai",
+    "type": "java.lang.String",
+    "description": "A description for 'custom.anthropic.bridge-via-openai'"
+  }
+]}

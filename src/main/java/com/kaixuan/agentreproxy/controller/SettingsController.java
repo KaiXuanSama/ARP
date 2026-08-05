@@ -3,9 +3,12 @@ package com.kaixuan.agentreproxy.controller;
 import com.kaixuan.agentreproxy.dto.AdminCredentialRequest;
 import com.kaixuan.agentreproxy.dto.AppSettingResponse;
 import com.kaixuan.agentreproxy.dto.DailyCheckinSettingRequest;
+import com.kaixuan.agentreproxy.dto.TextReplaceSettingRequest;
+import com.kaixuan.agentreproxy.service.RequestTextReplaceService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -33,6 +36,8 @@ import java.util.Map;
  * <ul>
  *   <li>{@code PUT /api/settings/schedule/daily-checkin} — 定时签到配置</li>
  *   <li>{@code PUT /api/settings/admin/credential} — 管理员凭证修改</li>
+ *   <li>{@code PUT /api/settings/request/text-replace} — 请求文本替换规则</li>
+ *   <li>{@code POST /api/settings/request/text-replace/preview} — 规则预览（不落库）</li>
  * </ul>
  * 未来新增设置项时，注册新的 {@code PUT /api/settings/xxx/yyy} 专有端点即可。
  */
@@ -41,9 +46,12 @@ import java.util.Map;
 public class SettingsController {
 
     private final SettingsService settingsService;
+    private final RequestTextReplaceService textReplaceService;
 
-    public SettingsController(SettingsService settingsService) {
+    public SettingsController(SettingsService settingsService,
+            RequestTextReplaceService textReplaceService) {
         this.settingsService = settingsService;
+        this.textReplaceService = textReplaceService;
     }
 
     // ============== 读取端点（全局） ==============
@@ -91,5 +99,36 @@ public class SettingsController {
     public Map<String, Object> updateAdminCredential(@RequestBody AdminCredentialRequest req) {
         AppSettingResponse result = settingsService.updateAdminCredential(req);
         return Map.of("data", result);
+    }
+
+    /**
+     * 请求文本替换规则保存 — {@code PUT /api/settings/request/text-replace}
+     * <p>
+     * 在请求发往上游之前，按规则对请求体中的文本字段做替换。
+     * <b>本服务不内置任何规则</b>，全部由使用者自行配置。
+     * <p>
+     * 保存前会校验正则合法性、长度上限与 scope 取值，不合法直接拒绝。
+     */
+    @PutMapping("/request/text-replace")
+    public Map<String, Object> updateTextReplace(@RequestBody TextReplaceSettingRequest req) {
+        AppSettingResponse result = settingsService.updateTextReplaceSetting(
+                req, textReplaceService::validate);
+        return Map.of("data", result);
+    }
+
+    /**
+     * 规则效果预览 — {@code POST /api/settings/request/text-replace/preview}
+     * <p>
+     * 仅在本机执行规则，<b>不落库、不发上游</b>，用于保存前验证规则是否符合预期。
+     * <p>
+     * 请求体：{@code {rules: {...}, sampleText: "...", scope: "system|user|tool_desc"}}
+     */
+    @PostMapping("/request/text-replace/preview")
+    public Map<String, Object> previewTextReplace(@RequestBody Map<String, Object> body) {
+        TextReplaceSettingRequest req = new com.fasterxml.jackson.databind.ObjectMapper()
+                .convertValue(body.get("rules"), TextReplaceSettingRequest.class);
+        String sample = body.get("sampleText") instanceof String s ? s : "";
+        String scope = body.get("scope") instanceof String s ? s : "system";
+        return Map.of("data", textReplaceService.preview(req, sample, scope));
     }
 }

@@ -5,10 +5,12 @@ import com.kaixuan.agentreproxy.model.ModelConfig;
 import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
 import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
+import com.kaixuan.agentreproxy.service.RequestTextReplaceService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -57,19 +59,43 @@ public class OpenAiController {
     private final SettingsService settingsService;
     private final ChatUsageRefreshScheduler usageRefreshScheduler;
     private final DownstreamApiKeyService downstreamApiKeyService;
+    private final RequestTextReplaceService textReplaceService;
     private final ObjectMapper objectMapper;
+
+    /**
+     * 是否打印每个 chunk 的原文（排查用）
+     * <p>
+     * 默认 {@code false}。开启方式（任选一种）：
+     * <ul>
+     *   <li>{@code application.yml} 里加 {@code custom.chunk-log.enabled: true}</li>
+     *   <li>启动参数 {@code --custom.chunk-log.enabled=true}</li>
+     *   <li>环境变量 {@code CUSTOM_CHUNKLOG_ENABLED=true}</li>
+     * </ul>
+     * <p>
+     * <strong>为什么要开关而不是直接用 DEBUG 级别</strong>：一次对话动辄上百个 chunk，
+     * 全量打印会把日志冲爆；而把整个包设成 DEBUG 又会带出大量无关框架日志。
+     * 用独立开关可以只开这一项，且用 INFO 级别输出（无需改 log level 就能看到）。
+     * <p>
+     * <strong>为什么前缀是 custom.* 而不是 debug.*</strong>：Spring Boot 内置顶层
+     * {@code debug} 布尔属性（开启调试日志），自定义 key 挂在 {@code debug} 下会导致
+     * "Expecting a boolean but got a Mapping" 绑定冲突。
+     */
+    @Value("${custom.chunk-log.enabled:false}")
+    private boolean chunkLogEnabled;
 
     public OpenAiController(UpstreamClient upstream,
             ModelsConfigService modelsConfig,
             SettingsService settingsService,
             ChatUsageRefreshScheduler usageRefreshScheduler,
             DownstreamApiKeyService downstreamApiKeyService,
+            RequestTextReplaceService textReplaceService,
             ObjectMapper objectMapper) {
         this.upstream = upstream;
         this.modelsConfig = modelsConfig;
         this.settingsService = settingsService;
         this.usageRefreshScheduler = usageRefreshScheduler;
         this.downstreamApiKeyService = downstreamApiKeyService;
+        this.textReplaceService = textReplaceService;
         this.objectMapper = objectMapper;
     }
 
@@ -128,6 +154,8 @@ public class OpenAiController {
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
                     usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
+                    // 按用户配置的规则做文本替换（未配置时为空操作）
+                    textReplaceService.applyToOpenAiBody(body);
                     return upstream.postChatStreamForAccount(ctx.accountId(), body)
                             // 侧路拦截:每条 SSE 文本 element 都检查一次
                             // CodeBuddy 的"结算 chunk"在 [DONE] 之前带 usage 字段
@@ -167,6 +195,13 @@ public class OpenAiController {
         if (element == null || element.isBlank()) {
             return;
         }
+        // 原始 element 全量打印(排查用) —— 由 custom.chunk-log.enabled 开关控制,默认关闭。
+        // 打印"未经任何处理"的 element,便于确认上游到底发了什么字段
+        // (例如思维链究竟落在 reasoning_content / thinking / 其它字段)。
+        if (chunkLogEnabled) {
+            log.info("[chunk原文] keyId={} accountId={} len={} >>>{}<<<",
+                    keyId, accountId, element.length(), element);
+        }
         try {
             // 按 \n 切 —— SSE 和 NDJSON 都用 \n 分隔 chunk
             for (String line : element.split("\n")) {
@@ -187,6 +222,11 @@ public class OpenAiController {
                     continue;
                 }
                 if (json.isEmpty() || "[DONE]".equals(json)) continue;
+                // 逐 chunk 摘要:把 delta 里所有"非空字符串字段"列出来,
+                // 一眼看出思维链在哪个字段(content / reasoning_content / 其它)
+                if (chunkLogEnabled) {
+                    logDeltaSummary(json);
+                }
                 // 关键:只对"真正有 usage 结算信息"的 chunk 落库
                 // 之前用 json.contains("\"usage\"") 嗅探,会把中间 chunk 的
                 // "usage":null 也误判为结算 chunk,导致 call_log 记录爆炸(2w+ 无用行)
@@ -201,6 +241,57 @@ public class OpenAiController {
         } catch (Exception e) {
             // 任何异常不外抛 —— 这是 side-channel,失败仅记日志
             log.warn("interceptChatChunk 异常 keyId={}: {}", keyId, e.getMessage());
+        }
+    }
+
+    /**
+     * 打印单个 chunk 的 delta 字段摘要（排查用）
+     * <p>
+     * 列出 {@code choices[].delta} 里<b>所有非空字段</b>，目的是一眼看出
+     * 思维链到底落在哪个字段（{@code content} / {@code reasoning_content} /
+     * {@code thinking} / 厂商自定义字段）。
+     * <p>
+     * 只打印非空值，避免满屏都是 {@code "reasoning_content": ""} 这种占位字段。
+     * 任何异常静默忽略 —— 这只是排查辅助，不能影响主流程。
+     */
+    private void logDeltaSummary(String json) {
+        try {
+            var node = objectMapper.readTree(json);
+            var choices = node.path("choices");
+            if (!choices.isArray() || choices.isEmpty()) {
+                // 结算 chunk（choices 为空）—— 单独标记出来
+                var usage = node.path("usage");
+                if (usage.isObject() && !usage.isEmpty()) {
+                    log.info("[chunk摘要] 结算chunk usage={}", usage);
+                }
+                return;
+            }
+            for (var choice : choices) {
+                var delta = choice.path("delta");
+                if (!delta.isObject()) {
+                    continue;
+                }
+                var parts = new java.util.ArrayList<String>();
+                delta.properties().forEach(e -> {
+                    var v = e.getValue();
+                    // 只收集“有实际内容”的字段
+                    boolean meaningful =
+                            (v.isTextual() && !v.asText().isEmpty())
+                                    || (v.isArray() && !v.isEmpty())
+                                    || (v.isObject() && !v.isEmpty());
+                    if (meaningful) {
+                        parts.add(e.getKey() + "=" + v);
+                    }
+                });
+                String finish = choice.path("finish_reason").asText("");
+                if (!parts.isEmpty() || !finish.isEmpty()) {
+                    log.info("[chunk摘要] delta非空字段: {}{}",
+                            parts.isEmpty() ? "(无)" : String.join(", ", parts),
+                            finish.isEmpty() ? "" : " | finish_reason=" + finish);
+                }
+            }
+        } catch (Exception ignored) {
+            // 排查日志失败不影响主流程
         }
     }
 

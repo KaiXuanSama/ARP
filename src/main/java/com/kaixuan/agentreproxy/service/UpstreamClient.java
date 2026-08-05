@@ -154,6 +154,37 @@ public class UpstreamClient {
     }
 
     /**
+     * 调用上游 <b>OpenAI</b> Chat 端点，但供 Anthropic 兼容层使用（流式）
+     * <p>
+     * <strong>为什么绕道 OpenAI 端点</strong>：上游的 Anthropic 端点
+     * （{@link #postAnthropicMessagesForAccount}）<b>不返回 {@code credit} 字段</b>，
+     * 导致无法统计积分消耗、{@code credit_limit} 失效。而 OpenAI 端点带 credit，
+     * 因此 Claude Code 这类只会说 Anthropic 协议的客户端，可以走
+     * "请求转 OpenAI → 响应翻译回 Anthropic" 的路径，兼得计费与协议兼容。
+     * <p>
+     * 与 {@link #postChatStreamForAccount} 的唯一差异是用 {@code exchangeToFlux}
+     * 显式透传上游 4xx（后者用 {@code retrieve()}，上游 400 会变成本地 500）。
+     */
+    public Flux<String> postChatStreamForAnthropicBridge(Long accountId, Map<String, Object> body) {
+        return resolveAuth(accountId)
+                .flatMapMany(cred -> webClient.post()
+                        .uri(UpstreamConstants.CHAT_BASE_URL + "/chat/completions")
+                        .headers(h -> applyAuth(h, cred))
+                        .bodyValue(body)
+                        .exchangeToFlux(resp -> {
+                            if (resp.statusCode().isError()) {
+                                return resp.bodyToMono(String.class)
+                                        .defaultIfEmpty("")
+                                        .flatMapMany(errBody -> Flux.error(
+                                                new UpstreamErrorException(
+                                                        resp.statusCode().value(), errBody)));
+                            }
+                            return resp.bodyToFlux(String.class);
+                        })
+                        .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
+    }
+
+    /**
      * 上游返回错误状态码时抛出，携带原始状态码与响应体
      * <p>
      * 让上层能把上游的真实错因（如 {@code 11102 model service info not found}）

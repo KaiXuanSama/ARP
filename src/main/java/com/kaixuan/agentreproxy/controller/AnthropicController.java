@@ -1,15 +1,21 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kaixuan.agentreproxy.dto.ChatRoutingContext;
 import com.kaixuan.agentreproxy.service.AnthropicStreamAggregator;
+import com.kaixuan.agentreproxy.service.AnthropicToOpenAiRequestConverter;
 import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
+import com.kaixuan.agentreproxy.service.OpenAiToAnthropicStreamConverter;
+import com.kaixuan.agentreproxy.service.RequestTextReplaceService;
 import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -42,13 +48,23 @@ import java.util.Map;
  *   <li><b>流式与非流式适配</b>：见下</li>
  * </ol>
  *
- * <h3>非流式适配（本控制器存在的主要理由）</h3>
- * 上游<b>无视请求体里的 {@code stream} 字段</b>，无论 true / false / 缺失，
- * 一律返回 {@code text/event-stream}。而 Anthropic SDK 的非流式调用
- * （{@code client.messages.create()} 不带 stream）期待 {@code application/json}
- * + 完整 Message 体，直接透传会让 SDK JSON 解析崩溃。因此：
+ * <h3>两种上游路径（由 {@code custom.anthropic.bridge-via-openai} 切换）</h3>
+ * <table border="1">
+ *   <tr><th></th><th>桥接模式（默认）</th><th>直连模式</th></tr>
+ *   <tr><td>上游端点</td><td>{@code /v2/chat/completions}</td><td>{@code /v1/messages}</td></tr>
+ *   <tr><td>转换</td><td>请求+响应双向翻译</td><td>零转换透传</td></tr>
+ *   <tr><td>{@code credit} 计费</td><td>✅ 正常</td><td>❌ 上游不返回</td></tr>
+ *   <tr><td>{@code credit_limit}</td><td>✅ 生效</td><td>❌ 失效</td></tr>
+ *   <tr><td>思维链</td><td>✅ （靠注入 {@code reasoning_effort}）</td><td>✅ 原生</td></tr>
+ * </table>
+ * <p>
+ * 默认走桥接模式是为了解决 <b>Claude Code 场景无法计费</b>的问题：
+ * Claude Code 硬编码走 Anthropic 协议，而上游 Anthropic 端点不给 {@code credit}。
+ *
+ * <h3>非流式适配</h3>
+ * 上游<b>无视请求体里的 {@code stream} 字段</b>，一律返回 SSE。因此：
  * <ul>
- *   <li>{@code stream: true} → 原样透传上游 SSE（零加工，最省开销）</li>
+ *   <li>{@code stream: true} → 透传 / 翻译后的 SSE</li>
  *   <li>否则 → 收干整个流，用 {@link AnthropicStreamAggregator} 聚合成
  *       完整 Message 后以 JSON 返回</li>
  * </ul>
@@ -57,16 +73,17 @@ import java.util.Map;
  * {@code {...}{...}} 这种多 JSON 同行形态，Jackson 只解析第一个，导致 content 恒空。
  *
  * <h3>计费差异（重要）</h3>
- * 上游 Anthropic 端点的 {@code message_delta.usage} <b>只有 token 数，没有
- * {@code credit} 字段</b>（与 OpenAI 端点的 {@code usage.credit} 不同）。
- * 现有 {@link DownstreamApiKeyService#recordChatUsage} 在解析不到 credit 时
- * 只落日志、不累加 {@code used_credits} —— 这正是我们要的语义：
- * <b>Anthropic 端点如实记录调用日志与 token 数，但不累加积分</b>。
+ * 上游 <b>Anthropic 端点</b>的 {@code message_delta.usage} 只有 token 数，
+ * <b>没有 {@code credit} 字段</b>（3 层排查确认：已落库数据 / 全流递归扇描 / 响应头）。
  * <p>
- * <b>副作用</b>：下游 key 的 {@code credit_limit} 对本端点<b>不生效</b>
- * （因为 used_credits 不增长）。这是有意为之 —— 与其按 token 编一个
- * 对不上上游账单的假积分，不如如实反映"上游未提供计费信息"。
- * 需要卡额度的场景请用 {@code call_count} 或在上游侧限制。
+ * 因此引入了<b>桥接模式</b>（默认开启）：改调上游 OpenAI 端点拿 credit，
+ * 再把响应翻译回 Anthropic 格式。这样：
+ * <ul>
+ *   <li>{@code call_count} ✅ 累加</li>
+ *   <li>{@code used_credits} ✅ 累加（桥接模式下）</li>
+ *   <li>{@code credit_limit} ✅ 生效（桥接模式下）</li>
+ * </ul>
+ * 直连模式（{@code bridge-via-openai=false}）下，后两项仍无法工作。
  */
 @RestController
 @RequestMapping("/v1")
@@ -79,19 +96,46 @@ public class AnthropicController {
     private final ChatUsageRefreshScheduler usageRefreshScheduler;
     private final DownstreamApiKeyService downstreamApiKeyService;
     private final AnthropicStreamAggregator aggregator;
+    private final AnthropicToOpenAiRequestConverter requestConverter;
+    private final RequestTextReplaceService textReplaceService;
     private final ObjectMapper objectMapper;
+
+    /**
+     * 是否通过 OpenAI 端点桥接（默认 {@code true}）
+     * <p>
+     * <strong>为什么默认开启</strong>：上游 Anthropic 端点实测<b>不返回 {@code credit}</b>，
+     * 导致 {@code used_credits} 不累加、{@code credit_limit} 形同虚设。而 OpenAI 端点带 credit，
+     * 所以默认走“请求转 OpenAI → 响应翻译回 Anthropic”。
+     * <p>
+     * 设为 {@code false} 可回退到直连上游 Anthropic 端点（零转换，但无计费）：
+     * {@code --custom.anthropic.bridge-via-openai=false}
+     */
+    @Value("${custom.anthropic.bridge-via-openai:true}")
+    private boolean bridgeViaOpenAi;
+
+    /**
+     * 是否打印每个 chunk 的原文（排查用），与 {@code OpenAiController} 共用同一开关
+     * <p>
+     * 默认 {@code false}。开启：{@code --custom.chunk-log.enabled=true}
+     */
+    @Value("${custom.chunk-log.enabled:false}")
+    private boolean chunkLogEnabled;
 
     public AnthropicController(UpstreamClient upstream,
             SettingsService settingsService,
             ChatUsageRefreshScheduler usageRefreshScheduler,
             DownstreamApiKeyService downstreamApiKeyService,
             AnthropicStreamAggregator aggregator,
+            AnthropicToOpenAiRequestConverter requestConverter,
+            RequestTextReplaceService textReplaceService,
             ObjectMapper objectMapper) {
         this.upstream = upstream;
         this.settingsService = settingsService;
         this.usageRefreshScheduler = usageRefreshScheduler;
         this.downstreamApiKeyService = downstreamApiKeyService;
         this.aggregator = aggregator;
+        this.requestConverter = requestConverter;
+        this.textReplaceService = textReplaceService;
         this.objectMapper = objectMapper;
     }
 
@@ -156,6 +200,22 @@ public class AnthropicController {
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
 
+                    // 按用户配置的规则做文本替换（未配置时为空操作）。
+                    // 在协议转换之前做 —— 规则按 Anthropic 结构定位字段，
+                    // 与后续走桥接还是直连无关。
+                    textReplaceService.applyToAnthropicBody(body);
+
+                    // ============ 两条上游路径，由 bridgeViaOpenAi 开关决定 ============
+                    // A) 桥接模式（默认）：请求转 OpenAI → 上游 → 响应翻译回 Anthropic
+                    //    优点：能拿到 usage.credit，积分统计与 credit_limit 正常工作
+                    // B) 直连模式：直接调上游 Anthropic 端点，零转换
+                    //    优点：协议原生，无转换风险；缺点：上游不给 credit，无法计费
+                    if (bridgeViaOpenAi) {
+                        return Mono.just(ResponseEntity.ok()
+                                .contentType(MediaType.TEXT_EVENT_STREAM)
+                                .body(bridgeThroughOpenAi(body, requestedModel, ctx)));
+                    }
+
                     // 上游始终返回 SSE，这里按下游意图决定透传还是聚合
                     Flux<String> upstreamFlux = upstream
                             .postAnthropicMessagesForAccount(ctx.accountId(), body)
@@ -191,6 +251,115 @@ public class AnthropicController {
     }
 
     /**
+     * 桥接模式：请求转 OpenAI → 调上游 → 响应翻译回 Anthropic SSE
+     * <p>
+     * <strong>核心目的</strong>：上游 Anthropic 端点不返回 {@code credit}，
+     * 而 OpenAI 端点返回。走这条路径可以在保持下游 Anthropic 协议兼容的同时，
+     * 正常统计积分消耗、让 {@code credit_limit} 生效。
+     * <p>
+     * <strong>转换器是有状态的</strong>：{@link OpenAiToAnthropicStreamConverter}
+     * 需要跨 chunk 维护"当前开着哪个 content block"，因此<b>每个请求必须新建实例</b>，
+     * 不能做成 Spring 单例 Bean。
+     * <p>
+     * <strong>计费拦截时机</strong>：在翻译<b>之前</b>拦截原始 OpenAI chunk
+     * （翻译后 credit 字段就被丢掉了），这样 {@code recordChatUsage} 能拿到
+     * 带 credit 的原文落库。
+     *
+     * @param anthropicBody  下游发来的 Anthropic 请求体
+     * @param requestedModel 下游请求的模型（转换失败时兜底用）
+     * @param ctx            路由上下文（accountId / keyId）
+     */
+    private Flux<ServerSentEvent<String>> bridgeThroughOpenAi(Map<String, Object> anthropicBody,
+            String requestedModel, ChatRoutingContext ctx) {
+        Map<String, Object> openAiBody;
+        try {
+            openAiBody = requestConverter.convert(anthropicBody);
+        } catch (Exception e) {
+            log.error("Anthropic → OpenAI 请求体转换失败", e);
+            return Flux.error(new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "请求体转换失败: " + e.getMessage()));
+        }
+
+        // 桥接模式下真正发给上游的是转换后的 OpenAI 体 —— 排查时必须能看到它，
+        // 否则只看到 Anthropic 侧的替换结果，无法确认转换过程有没有把内容改回去
+        if (chunkLogEnabled) {
+            try {
+                String json = objectMapper.writeValueAsString(openAiBody);
+                log.info("[请求体-桥接后-发给上游OpenAI] 总长={} 字符\n{}", json.length(), json);
+            } catch (Exception e) {
+                log.warn("[请求体-桥接后] 序列化失败: {}", e.getMessage());
+            }
+        }
+
+        // 有状态转换器：每个请求一个实例
+        OpenAiToAnthropicStreamConverter converter =
+                new OpenAiToAnthropicStreamConverter(objectMapper, requestedModel);
+
+        return upstream.postChatStreamForAnthropicBridge(ctx.accountId(), openAiBody)
+                // 先拦截原始 OpenAI chunk 落库（此时 credit 还在）
+                .doOnNext(element -> interceptOpenAiChunkForBilling(
+                        element, ctx.keyId(), ctx.accountId()))
+                // 再翻译成 Anthropic 事件
+                .flatMapIterable(converter::convert)
+                // 流正常结束时补发收尾事件（message_delta + message_stop）
+                .concatWith(Flux.defer(() -> Flux.fromIterable(converter.finish())))
+                // ❗ 必须用 ServerSentEvent 显式携带 event 名：
+                //   Anthropic SDK 依赖 `event:` 行判断事件类型。
+                //   若直接返回 Flux<String>，WebFlux 会把整个字符串当作 data 值再包一层
+                //   `data:`，产出 `data:event: message_start` 这种畸形报文，
+                //   客户端解析不到任何事件（表现为 "empty or malformed response"）。
+                .map(ev -> ServerSentEvent.<String>builder()
+                        .event(ev.name())
+                        .data(ev.data())
+                        .build());
+    }
+
+    /**
+     * 桥接模式下的计费拦截 —— 复用 OpenAI 端点的结算 chunk 识别逻辑
+     * <p>
+     * 与 {@link #interceptMessageChunk} 的差异：这里处理的是<b>原始 OpenAI chunk</b>
+     * （带 {@code usage.credit}），而非 Anthropic 事件。落库后
+     * {@code DownstreamApiKeyService.recordChatUsage} 能解析出 credit 并累加
+     * {@code used_credits} —— 这正是桥接模式存在的意义。
+     */
+    private void interceptOpenAiChunkForBilling(String element, Long keyId, Long accountId) {
+        if (element == null || element.isBlank()) {
+            return;
+        }
+        if (chunkLogEnabled) {
+            log.info("[桥接-OpenAI原文] keyId={} accountId={} len={} >>>{}<<<",
+                    keyId, accountId, element.length(), element);
+        }
+        try {
+            for (String line : element.split("\n")) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                String json;
+                if (trimmed.startsWith("data:")) {
+                    json = trimmed.substring("data:".length()).trim();
+                } else if (trimmed.startsWith("{")) {
+                    json = trimmed;
+                } else {
+                    continue;
+                }
+                if (json.isEmpty() || "[DONE]".equals(json)) {
+                    continue;
+                }
+                // 只对带真实 usage 的结算 chunk 落库（与 OpenAiController 同逻辑）
+                var node = objectMapper.readTree(json);
+                var usage = node.get("usage");
+                if (usage != null && !usage.isNull() && usage.isObject() && !usage.isEmpty()) {
+                    downstreamApiKeyService.recordChatUsage(keyId, accountId, json);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("桥接计费拦截异常 keyId={}: {}", keyId, e.getMessage());
+        }
+    }
+
+    /**
      * 侧路拦截 Anthropic SSE，识别 {@code message_delta} 结算事件并落库
      * <p>
      * 与 {@code OpenAiController.interceptChatChunk} 的关键差异：
@@ -210,6 +379,12 @@ public class AnthropicController {
     private void interceptMessageChunk(String element, Long keyId, Long accountId) {
         if (element == null || element.isBlank()) {
             return;
+        }
+        // 原始 element 全量打印（排查用）—— 与 OpenAI 端点共用 custom.chunk-log.enabled 开关，
+        // 便于把两个端点的 chunk 放在同一份日志里对照
+        if (chunkLogEnabled) {
+            log.info("[Anthropic chunk原文] keyId={} accountId={} len={} >>>{}<<<",
+                    keyId, accountId, element.length(), element);
         }
         try {
             for (String line : element.split("\n")) {
