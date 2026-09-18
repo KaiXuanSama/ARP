@@ -47,6 +47,24 @@ public final class AnthropicErrorMapper {
      * @return 可直接序列化为 JSON 的 Anthropic 错误结构
      */
     public static Map<String, Object> map(String message, HttpStatus status) {
+        return map(message, status, null);
+    }
+
+    /**
+     * 按状态码 + 消息内容映射为 Anthropic 错误 Map，并附加上游原始错误信息
+     * <p>
+     * 上游错误时，除了 Anthropic 标准字段外，额外带上
+     * {@code error.upstream = {"status": 400, "body": {...上游原始 JSON...}}}，
+     * 让下游能看到上游返回的完整信息（{@code code} / {@code requestId} /
+     * {@code extError} / {@code displayMsg} 等），而不是只有一句加工后的提示。
+     *
+     * @param message      内部错误消息
+     * @param status       HTTP 状态码
+     * @param upstreamInfo 上游原始信息，可空
+     * @return 可直接序列化为 JSON 的 Anthropic 错误结构
+     */
+    public static Map<String, Object> map(String message, HttpStatus status,
+            Map<String, Object> upstreamInfo) {
         String safeMessage = (message == null || message.isBlank())
                 ? "请求处理失败"
                 : message;
@@ -54,6 +72,9 @@ public final class AnthropicErrorMapper {
         Map<String, Object> error = new LinkedHashMap<>();
         error.put("type", resolveType(status));
         error.put("message", safeMessage);
+        if (upstreamInfo != null) {
+            error.put("upstream", upstreamInfo);
+        }
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("type", "error");

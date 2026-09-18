@@ -28,7 +28,8 @@ public record OpenAiErrorResponse(
         String message,
         String type,
         String param,
-        String code
+        String code,
+        Map<String, Object> upstream
 ) {
     public static final String TYPE_INVALID_REQUEST = "invalid_request_error";
     public static final String TYPE_AUTHENTICATION = "authentication_error";
@@ -37,10 +38,35 @@ public record OpenAiErrorResponse(
     public static final String TYPE_SERVER = "server_error";
 
     /**
+     * 兼容构造器（不带上游信息）
+     * <p>
+     * 本地错误（鉴权失败、模型不允许等）没有上游参与，不需要 {@code upstream} 字段。
+     * 保留这个签名让既有调用点无需改动。
+     */
+    public OpenAiErrorResponse(String message, String type, String param, String code) {
+        this(message, type, param, code, null);
+    }
+
+    /**
+     * 附加上游原始错误信息，返回新实例
+     * <p>
+     * 用于把上游返回的<b>完整原始响应</b>（状态码 + body）透传给下游，
+     * 而不是只给一句加工后的提示 —— 上游 body 里通常有 {@code code} /
+     * {@code requestId} / {@code extError} / {@code displayMsg} 等排查必需的信息。
+     *
+     * @param upstreamInfo {@code {"status": 400, "body": {...上游原始 JSON...}}}
+     */
+    public OpenAiErrorResponse withUpstream(Map<String, Object> upstreamInfo) {
+        return new OpenAiErrorResponse(message, type, param, code, upstreamInfo);
+    }
+
+    /**
      * 把当前 record 序列化成 OpenAI 兼容的 map 结构: {@code {"error": {...}}}
      * <p>
      * 用 {@link LinkedHashMap} 保证字段输出顺序;{@code param} 默认 null(OpenAI 标准字段
      * 但我们没有具体参数可以填)。
+     * <p>
+     * {@code upstream} 非空时附加在 {@code error} 对象内，包含上游原始状态码与响应体。
      */
     public Map<String, Object> toMap() {
         Map<String, Object> inner = new LinkedHashMap<>();
@@ -48,6 +74,9 @@ public record OpenAiErrorResponse(
         inner.put("type", type);
         inner.put("param", param);
         inner.put("code", code);
+        if (upstream != null) {
+            inner.put("upstream", upstream);
+        }
         return Map.of("error", inner);
     }
 }

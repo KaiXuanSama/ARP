@@ -46,10 +46,12 @@ public class OpenAiWebExceptionHandler implements ErrorWebExceptionHandler {
 
     @Override
     public Mono<Void> handle(ServerWebExchange exchange, Throwable ex) {
-        // 上游错误（Anthropic 端点用 exchangeToFlux 显式抛出）→ 透传上游状态码与错因
+        // 上游错误（chat / messages 端点用 exchangeToFlux 显式抛出）
+        // → 透传上游状态码 + 完整原始响应体（不加工），message 另附一句可读摘要
         if (ex instanceof com.kaixuan.agentreproxy.service.UpstreamClient.UpstreamErrorException ue) {
             return writeError(exchange, resolveStatus(ue.getStatusCode()),
-                    extractUpstreamMessage(ue.getResponseBody(), ue.getStatusCode()));
+                    extractUpstreamMessage(ue.getResponseBody(), ue.getStatusCode()),
+                    buildUpstreamInfo(ue.getStatusCode(), ue.getResponseBody()));
         }
 
         // 只处理 ResponseStatusException(OpenAI / Anthropic controller 抛的错误)
@@ -63,7 +65,40 @@ public class OpenAiWebExceptionHandler implements ErrorWebExceptionHandler {
             status = HttpStatus.INTERNAL_SERVER_ERROR;
         }
         String message = rse.getReason() != null ? rse.getReason() : rse.getMessage();
-        return writeError(exchange, status, message);
+        return writeError(exchange, status, message, null);
+    }
+
+    /**
+     * 构造上游原始信息块，用于完整回传给下游
+     * <p>
+     * 结构：{@code {"status": <上游HTTP状态码>, "body": <上游原始响应体>}}
+     * <p>
+     * {@code body} 优先解析为 JSON 对象（保留 {@code code} / {@code requestId} /
+     * {@code extError} / {@code displayMsg} 等全部字段）；解析失败（如 APISIX 的
+     * HTML 错误页）则原样以字符串返回，并做长度截断避免超大响应体撑爆下游。
+     * <p>
+     * <strong>为什么要完整透传而不是只给摘要</strong>：上游错误的排查价值集中在
+     * {@code code}（业务码，如 11148）与 {@code requestId}（可用于找上游客服定位），
+     * 这些在加工成一句话提示后就丢了。
+     */
+    private static Map<String, Object> buildUpstreamInfo(int statusCode, String rawBody) {
+        Map<String, Object> info = new java.util.LinkedHashMap<>();
+        info.put("status", statusCode);
+        if (rawBody == null || rawBody.isBlank()) {
+            info.put("body", null);
+            return info;
+        }
+        String trimmed = rawBody.trim();
+        try {
+            // 解析成 JSON 节点后原样放入（保留全部字段与嵌套结构）
+            info.put("body", SHARED_MAPPER.readTree(trimmed));
+        } catch (Exception ignored) {
+            // 非 JSON（HTML 网关页 / 纯文本）→ 原样字符串，超长则截断
+            info.put("body", trimmed.length() > 2000
+                    ? trimmed.substring(0, 2000) + "...(truncated)"
+                    : trimmed);
+        }
+        return info;
     }
 
     /**
@@ -73,12 +108,21 @@ public class OpenAiWebExceptionHandler implements ErrorWebExceptionHandler {
      * 而 Anthropic 端点 {@code /v1/messages} 与 OpenAI 端点同在 {@code /v1} 下。
      * 若统一渲染成 OpenAI 格式,Anthropic 官方 SDK 会因顶层缺 {@code type} 字段
      * 而解析失败(它期待 {@code {"type":"error","error":{...}}})。
+     *
+     * @param upstreamInfo 上游原始错误信息，可空。非空时附在 {@code error.upstream}
      */
-    private Mono<Void> writeError(ServerWebExchange exchange, HttpStatus status, String message) {
+    private Mono<Void> writeError(ServerWebExchange exchange, HttpStatus status,
+            String message, Map<String, Object> upstreamInfo) {
         String path = exchange.getRequest().getPath().value();
         Map<String, Object> body = isAnthropicPath(path)
-                ? AnthropicErrorMapper.map(message, status)
-                : OpenAiErrorMapper.map(message, status).toMap();
+                ? AnthropicErrorMapper.map(message, status, upstreamInfo)
+                : OpenAiErrorMapper.map(message, status).withUpstream(upstreamInfo).toMap();
+
+        // 上游错误回传时补一个响应头，方便下游/运维快速识别错误来源层次
+        if (upstreamInfo != null) {
+            exchange.getResponse().getHeaders()
+                    .set("X-Upstream-Status", String.valueOf(upstreamInfo.get("status")));
+        }
 
         var response = exchange.getResponse();
         response.setStatusCode(status);
