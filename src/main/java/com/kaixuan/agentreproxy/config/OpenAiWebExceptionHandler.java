@@ -134,7 +134,20 @@ public class OpenAiWebExceptionHandler implements ErrorWebExceptionHandler {
         }
         try {
             var node = SHARED_MAPPER.readTree(trimmed);
-            for (String field : new String[] { "error", "message", "error_msg" }) {
+            // 1) 优先取上游给的本地化友好提示 displayMsg.zh / displayMsg.en
+            //    上游对业务错误附带 {displayMsg:{en:"...",zh:"...",zh-hant:"..."}}
+            //    例：11148 → "工具调用记录不完整，请重新发起对话。"
+            var displayMsg = node.get("displayMsg");
+            if (displayMsg != null && displayMsg.isObject()) {
+                for (String lang : new String[] { "zh", "en" }) {
+                    var dv = displayMsg.get(lang);
+                    if (dv != null && dv.isTextual() && !dv.asText().isBlank()) {
+                        return "上游错误: " + dv.asText();
+                    }
+                }
+            }
+            // 2) 再取常规错误字段（msg 是上游业务错误使用的字段名）
+            for (String field : new String[] { "msg", "error", "message", "error_msg" }) {
                 var v = node.get(field);
                 if (v != null && v.isTextual() && !v.asText().isBlank()) {
                     return "上游错误: " + v.asText();

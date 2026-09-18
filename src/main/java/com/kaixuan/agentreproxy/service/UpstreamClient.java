@@ -87,29 +87,54 @@ public class UpstreamClient {
                         .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
     }
 
-    // ============== Chat（暂保留旧路径，后续单独立项改造） ==============
+    // ============== Chat ==============
 
-     /**
-     * 调用 Chat 补全端点（流式 SSE透传），按 accountId 路由
+    /**
+     * 调用 Chat 补全端点（流式 SSE 透传），按 accountId 路由
      * <p>
-     *逻辑:
+     * 逻辑：
      * <ul>
-     * <li>先按 accountId解析凭证({@link #resolveAuth(Long)})</li>
-     * <li>JWT 模式 → Authorization + X-User-Id + X-Domain</li>
-     * <li>API Key 模式 →仅 Authorization</li>
-     * <li>之后直接把上游 SSE chunk透传给下游,本服务不做任何加工</li>
+     *   <li>先按 accountId 解析凭证（{@link #resolveAuth(Long)}）</li>
+     *   <li>JWT 模式 → Authorization + X-User-Id + X-Domain</li>
+     *   <li>API Key 模式 → 仅 Authorization</li>
+     *   <li>之后直接把上游 SSE chunk 透传给下游，本服务不做任何加工</li>
      * </ul>
+     * <p>
+     * <strong>❗ 必须用 exchangeToFlux 而非 retrieve()（2026-09 修复）</strong>：
+     * {@code retrieve()} 遇上游 4xx/5xx 抛 {@code WebClientResponseException}，
+     * 该异常既不是 {@code ResponseStatusException} 也不是 {@code UpstreamErrorException}，
+     * 无法被 {@code OpenAiWebExceptionHandler} 处理。又因本方法返回 SSE 流（响应头已按
+     * 200 写出），异常只能终止流 —— 下游最终收到 <b>HTTP 200 + 空响应体</b>，
+     * 上游的真实错因完全丢失。
+     * <p>
+     * 实测案例：上游对工具调用历史不完整的请求返回
+     * {@code 400 {"code":11148,"msg":"tool calls and tool results do not match..."}}，
+     * 修复前客户端只看到空响应，无从得知需要重开会话。
+     * <p>
+     * 改用 {@code exchangeToFlux} 后，上游错误状态码与响应体被包装成
+     * {@link UpstreamErrorException} 抛出，由 {@code OpenAiWebExceptionHandler}
+     * 渲染成 OpenAI 格式的错误 JSON（含上游原始错因）。
      */
-     public Flux<String> postChatStreamForAccount(Long accountId, Map<String, Object> body) {
-     return resolveAuth(accountId)
-     .flatMapMany(cred -> webClient.post()
-     .uri(UpstreamConstants.CHAT_BASE_URL + "/chat/completions")
-     .headers(h -> applyAuth(h, cred))
-     .bodyValue(body)
-     .retrieve()
-     .bodyToFlux(String.class)
-     .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
-     }
+    public Flux<String> postChatStreamForAccount(Long accountId, Map<String, Object> body) {
+        return resolveAuth(accountId)
+                .flatMapMany(cred -> webClient.post()
+                        .uri(UpstreamConstants.CHAT_BASE_URL + "/chat/completions")
+                        .headers(h -> applyAuth(h, cred))
+                        .bodyValue(body)
+                        .exchangeToFlux(resp -> {
+                            if (resp.statusCode().isError()) {
+                                // 上游 4xx/5xx：读完整 body 后抛 UpstreamErrorException，
+                                // 由全局异常处理器转成带原始错因的错误响应
+                                return resp.bodyToMono(String.class)
+                                        .defaultIfEmpty("")
+                                        .flatMapMany(errBody -> Flux.error(
+                                                new UpstreamErrorException(
+                                                        resp.statusCode().value(), errBody)));
+                            }
+                            return resp.bodyToFlux(String.class);
+                        })
+                        .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
+    }
 
     // ============== Anthropic Messages（原生透传） ==============
 
