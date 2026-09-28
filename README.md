@@ -15,6 +15,11 @@
 </p>
 
 <p align="center">
+  同时提供 <strong>OpenAI</strong> 与 <strong>Anthropic</strong> 两套兼容协议端点，
+  支持 Claude Code / OpenAI SDK / Anthropic SDK 直接接入。
+</p>
+
+<p align="center">
   <strong>注意：本项目与 Tencent / CodeBuddy 官方无任何关联，仅供学习研究使用。</strong>
 </p>
 
@@ -202,13 +207,16 @@ java -jar app.jar --models.config.path=/etc/agentreproxy/modelsConfig.json
 
 ## API 端点
 
-服务中常用的 3 个端点:1 个 Web 管理页 + 2 个 OpenAI 兼容端点(下发给 B 端消费者)。
+服务对外提供 **1 个 Web 管理页** + **两套兼容协议端点**（OpenAI 与 Anthropic），后两者共用同一套下游 Key 鉴权、选号与模型白名单逻辑。
 
 ### 1. Web 管理页
 
 - **访问**:`http://localhost:8351/`(Docker 部署换成服务器 IP)
-- **鉴权**:无(本地/内网使用)
-- 账号管理、签到、流量包、下游 API Key 派发、模型配置、调度设置都在这里
+- **鉴权**:需登录(默认用户名/密码均为 `root`,**首次登录后请立即在「系统设置 → 账号管理」中修改**)
+- 账号管理、签到、流量包、下游 API Key 派发、模型配置、调度设置、请求文本替换都在这里
+
+> 登录态是内存中的 token(12 小时有效期),**服务重启后需重新登录**。
+> 忘记密码:删除数据库 `app_settings` 表中 `admin.credential` 这一行,重启服务会重新写入默认 `root/root`。
 
 ### 2. OpenAI · 流式对话
 
@@ -237,6 +245,46 @@ curl http://localhost:8351/v1/chat/completions \
 curl http://localhost:8351/v1/models \
   -H "Authorization: Bearer ak-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
+
+### 4. Anthropic · 对话
+
+- **路径**:`POST /v1/messages`
+- **鉴权**:`x-api-key: <API Key>`(Anthropic SDK 默认头)或 `Authorization: Bearer <API Key>`
+- **响应**:`stream: true` 时返回 SSE;否则聚合为完整 Message JSON
+- 错误按 Anthropic 风格返回(`{"type":"error","error":{"type","message"}}`)
+
+```bash
+# 流式
+curl http://localhost:8351/v1/messages \
+  -H "x-api-key: ak-xxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","max_tokens":128,"stream":true,
+       "messages":[{"role":"user","content":"你好"}]}'
+
+# 非流式(服务内部聚合)
+curl http://localhost:8351/v1/messages \
+  -H "x-api-key: ak-xxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","max_tokens":128,
+       "messages":[{"role":"user","content":"你好"}]}'
+```
+
+**Claude Code 接入**:设置环境变量即可(`ANTHROPIC_BASE_URL` 指向本服务):
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8351
+export ANTHROPIC_API_KEY=ak-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Anthropic 官方 SDK(`anthropic-python` / `@anthropic-ai/sdk`)同样把 `base_url` 指向本服务、
+`api_key` 填 `ak-...` 即可,流式与非流式两种用法都支持。
+
+> **计费说明**:该端点默认走「桥接模式」——请求转换为 OpenAI 格式调上游,以便拿到上游返回的
+> `credit` 计费信息。因此 `used_credits` 累加与 `credit_limit` 限制**均正常工作**。
+> 如需改为直连上游 Anthropic 端点(零转换但无计费),设 `custom.anthropic.bridge-via-openai=false`。
+>
+> **模型名注意**:`modelsConfig.json` 中**没有 Claude 系列模型**,请填清单里实际存在的 model id
+> (如 `deepseek-v4-flash`)。填 `claude-*` 会撞上游 `11102` 错误。
 
 ---
 
