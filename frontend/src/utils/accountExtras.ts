@@ -72,6 +72,93 @@ export interface CachedAccount {
   apiKey: string | null
   enabled: boolean
   updatedAt: number
+  /** 凭证过期时间(毫秒时间戳);null = 无过期信息(如 API Key 账号) */
+  credentialExpiresAt: number | null
+  /** refreshToken 过期时间(毫秒时间戳);null = 无此项 */
+  refreshExpiresAt: number | null
+}
+
+/**
+ * 从 JWT 的 payload 解出 `exp`（秒）并转成毫秒时间戳
+ * <p>
+ * 作为 `expiresAt` 字段缺失时的兜底 —— 老版本客户端写入的 accountJson
+ * 可能只有 accessToken 而没有 expiresAt，但 JWT 本身自带 exp。
+ * <p>
+ * 只做 Base64 解码，不校验签名（我们只需要读过期时间做展示）。
+ * 解不出或 payload 无 exp 时返回 null。
+ */
+function expiresAtFromJwt(token: string | null | undefined): number | null {
+  if (!token || typeof token !== 'string') return null
+  const parts = token.split('.')
+  if (parts.length < 2) return null
+  try {
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    // 补齐 Base64 padding（JWT 规范要求去掉 padding，atob 要求有）
+    b64 += '='.repeat((4 - (b64.length % 4)) % 4)
+    const bin = atob(b64)
+    // 用 TextDecoder 处理 UTF-8：直接 atob 会把中文昵称解成乱码，也让 JSON.parse 失败
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0))
+    const payload = JSON.parse(new TextDecoder('utf-8').decode(bytes))
+    const exp = payload?.exp
+    if (typeof exp === 'number' && exp > 0) return exp * 1000
+  } catch {
+    /* 非标准 JWT（如 API Key、或已加密）→ 不提供过期信息 */
+  }
+  return null
+}
+
+/**
+ * 解析 accountJson 中的凭证过期时间
+ * <p>
+ * 兼容结构与 {@link extractNicknameFromJson} 保持一致：
+ * <ol>
+ *   <li>嵌套：{@code obj.auth.expiresAt}</li>
+ *   <li>数组：{@code obj.accounts[0].auth.expiresAt}（antigravity-tools 导出格式）</li>
+ *   <li>扁平：{@code obj.expiresAt} / {@code obj.auth_expires_at}</li>
+ * </ol>
+ * 若都取不到，则回退解析 accessToken 的 JWT {@code exp}。
+ * <p>
+ * 返回 0 或负数视为无效（历史数据可能写入 0 表示"未记录"）。
+ */
+export function extractCredentialExpiry(
+  accountJson: string | null | undefined
+): { credentialExpiresAt: number | null; refreshExpiresAt: number | null; accessToken: string | null } {
+  const empty = { credentialExpiresAt: null, refreshExpiresAt: null, accessToken: null }
+  if (!accountJson) return empty
+  let obj: any
+  try {
+    obj = JSON.parse(accountJson)
+  } catch {
+    return empty
+  }
+
+  // 三种结构统一取出 auth 节点
+  const auth = obj?.auth ?? obj?.accounts?.[0]?.auth ?? null
+  const accessToken: string | null =
+    (typeof auth?.accessToken === 'string' && auth.accessToken) ||
+    (typeof obj?.accessToken === 'string' && obj.accessToken) ||
+    (typeof obj?.auth_token === 'string' && obj.auth_token) ||
+    null
+
+  /** 数字才认；0 / 负数 / 非数字一律当"未记录" */
+  const pick = (...candidates: unknown[]): number | null => {
+    for (const c of candidates) {
+      if (typeof c === 'number' && c > 0) return c
+    }
+    return null
+  }
+
+  const credentialExpiresAt =
+    pick(auth?.expiresAt, obj?.expiresAt, obj?.auth_expires_at) ??
+    expiresAtFromJwt(accessToken)
+
+  const refreshToken: string | null =
+    (typeof auth?.refreshToken === 'string' && auth.refreshToken) || null
+  const refreshExpiresAt =
+    pick(auth?.refreshExpiresAt, obj?.refreshExpiresAt, obj?.auth_refresh_expires_at) ??
+    expiresAtFromJwt(refreshToken)
+
+  return { credentialExpiresAt, refreshExpiresAt, accessToken }
 }
 
 /**
@@ -108,16 +195,23 @@ function readCachedAccounts(): CachedAccount[] {
     if (!raw) return []
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
-    return (parsed as Array<Partial<CachedAccount>>).map((item) => ({
-      id: Number(item.id),
-      uid: String(item.uid ?? '-'),
-      nickname: String(item.nickname ?? extractNicknameFromJson(item.accountJson)),
-      accountJson: String(item.accountJson ?? ''),
-      accessToken: item.accessToken ?? null,
-      apiKey: item.apiKey ?? null,
-      enabled: item.enabled !== false,
-      updatedAt: Number(item.updatedAt ?? 0),
-    }))
+    return (parsed as Array<Partial<CachedAccount>>).map((item) => {
+      const json = String(item.accountJson ?? '')
+      const expiry = extractCredentialExpiry(json)
+      return {
+        id: Number(item.id),
+        uid: String(item.uid ?? '-'),
+        nickname: String(item.nickname ?? extractNicknameFromJson(json)),
+        accountJson: json,
+        accessToken: item.accessToken ?? expiry.accessToken ?? null,
+        apiKey: item.apiKey ?? null,
+        enabled: item.enabled !== false,
+        updatedAt: Number(item.updatedAt ?? 0),
+        // 缓存里可能存的是旧结构（无这两个字段）→ 现算一次，避免一次性显示"未知"
+        credentialExpiresAt: item.credentialExpiresAt ?? expiry.credentialExpiresAt,
+        refreshExpiresAt: item.refreshExpiresAt ?? expiry.refreshExpiresAt,
+      }
+    })
   } catch {
     return []
   }
@@ -143,25 +237,34 @@ export function getCachedAccounts(): CachedAccount[] {
  * <p>
  * nickname 字段可选(AccountManagement 那边有自己的 extractNickname,通常会直接传),未提供时这里自动从 accountJson 解析填上
  * 同步提取 nickname 字段,后续 Settings.vue 等只读场景直接拿到现成的 nickname
+ * <p>
+ * credentialExpiresAt / refreshExpiresAt 总是由 accountJson 现算(不信任调用方传入),
+ * 因为它们是展示用的派生值,单一来源更不容易出错。
  */
 export function setCachedAccounts(
-  records: Array<Omit<CachedAccount, 'nickname'> & { nickname?: string }>
+  records: Array<Omit<CachedAccount, 'nickname' | 'credentialExpiresAt' | 'refreshExpiresAt'> & { nickname?: string }>
 ): void {
   // 防御性:过滤掉 uid 为 '-' 的兜底行(AccountManagement 列表里会有)
   const cleaned: CachedAccount[] = records
-    .filter((r): r is Omit<CachedAccount, 'nickname'> & { nickname?: string } => Boolean(r && r.uid && r.uid !== '-'))
-    .map((r) => ({
-      id: r.id,
-      uid: r.uid,
-      accountJson: r.accountJson,
-      accessToken: r.accessToken,
-      apiKey: r.apiKey,
-      enabled: r.enabled !== false,
-      updatedAt: r.updatedAt,
-      nickname: r.nickname && r.nickname !== '未定义'
-        ? r.nickname
-        : extractNicknameFromJson(r.accountJson),
-    }))
+    .filter((r): r is Omit<CachedAccount, 'nickname' | 'credentialExpiresAt' | 'refreshExpiresAt'> & { nickname?: string } => Boolean(r && r.uid && r.uid !== '-'))
+    .map((r) => {
+      const expiry = extractCredentialExpiry(r.accountJson)
+      return {
+        id: r.id,
+        uid: r.uid,
+        accountJson: r.accountJson,
+        // 后端返回的 accessToken 列为准;缺失时才从 accountJson 补(兼容 API Key 账号)
+        accessToken: r.accessToken ?? expiry.accessToken,
+        apiKey: r.apiKey,
+        enabled: r.enabled !== false,
+        updatedAt: r.updatedAt,
+        nickname: r.nickname && r.nickname !== '未定义'
+          ? r.nickname
+          : extractNicknameFromJson(r.accountJson),
+        credentialExpiresAt: expiry.credentialExpiresAt,
+        refreshExpiresAt: expiry.refreshExpiresAt,
+      }
+    })
   writeCachedAccounts(cleaned)
 }
 

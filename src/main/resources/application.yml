@@ -54,3 +54,23 @@ custom:
   #      导致该场景完全无法统计消耗。桥接模式是为解决这个问题引入的。
   anthropic:
     bridge-via-openai: true
+
+  # 扫码登录(获取上游凭证)
+  #   背景:新版 workbuddy-desktop.info 对凭证字段做了加密($wbEncrypted 信封),
+  #        无法读取。转而通过登录流程的网络接口获取明文 token。
+  #
+  #   self-origin: 本服务的对外访问地址,会被写入登录链接的 arp 参数。
+  #                用户浏览器访问 CodeBuddy 登录页后,书签脚本据此回传 token。
+  #                ⚠️ Docker / 反向代理部署时**必须改成用户能访问到的真实地址**,
+  #                   否则回传会失败(浏览器无法访问 localhost:8351)。
+  #    version:     登录页的客户端版本号参数(上游当前为 5.1.7)。
+  #                 上游若加强校验需同步更新。
+  #    allowed-origins: 凭证回传端点(/api/accounts/import-token)的 CORS 白名单,
+  #                     逗号分隔。只有这些来源才会收到 Access-Control-Allow-Origin 响应头。
+  #                     默认只放行 CodeBuddy 登录页(书签脚本的唯一来源)。
+  #                     管理面板自己的请求(同源 / Vite 代理)不需要白名单 ——
+  #                     过滤器只补响应头、不拒绝请求。
+  login:
+    self-origin: ${ARP_SELF_ORIGIN:http://localhost:8351}
+    version: 5.1.7
+    allowed-origins: ${ARP_ALLOWED_ORIGINS:https://www.codebuddy.cn}
