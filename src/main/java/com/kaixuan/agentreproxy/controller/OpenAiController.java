@@ -23,7 +23,6 @@ import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -155,8 +154,6 @@ public class OpenAiController {
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
                     usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
-                    // 规范化多模态 content 块顺序(必须在文本替换之前 —— 替换引擎只认字符串 content)
-                    normalizeMultimodalBlockOrder(body);
                     // 按用户配置的规则做文本替换（未配置时为空操作）
                     textReplaceService.applyToOpenAiBody(body);
                     return upstream.postChatStreamForAccount(ctx.accountId(), body)
@@ -165,108 +162,6 @@ public class OpenAiController {
                             // 透传原 element 给客户端,只做 side-effect 解析 + 落库
                             .doOnNext(element -> interceptChatChunk(element, ctx.keyId(), ctx.accountId()));
                 });
-    }
-
-    /**
-     * 规范化多模态 content 块的顺序 —— 保证 {@code text} 块排在 {@code image_url} 块之前
-     * <p>
-     * <strong>为什么需要</strong>：上游对多模态消息的块顺序有严格约束 ——
-     * {@code content} 数组的 <b>index 0 必须是 text 块</b>，{@code image_url} 只能排在后面。
-     * 而下游 Agent（如 GitHub Copilot Chat）发出的顺序**可能相反**
-     * （2026-09 抓包对比确认）：
-     * <pre>
-     * 上游期望 (wb-body)：[{type:"text",...}, {type:"image_url",...}]
-     * Copilot  实际：      [{image_url:{...}},   {type:"text",...}]      ← 顺序反了
-     * </pre>
-     * 顺序错误时上游直接拒绝请求。
-     * <p>
-     * <strong>处理策略</strong>：只调整顺序，<b>不增删任何字段、不补 {@code type} 字段</b>
-     * （下游发的 image 块可能缺 {@code type}，但实测不影响，故保持原样透传）。
-     * <p>
-     * <strong>作用范围</strong>：
-     * <ul>
-     *   <li>只处理 {@code content} 是<b>数组</b>的消息；字符串 content 不动</li>
-     *   <li>只处理<b>同时含</b> text 与 image_url 的消息；纯文本/纯图片消息不动</li>
-     *   <li>只对 OpenAI 端点生效。Anthropic 端点的 content 块语义不同
-     *       （{@code type:"image"} + {@code source}），由
-     *       {@code AnthropicToOpenAiRequestConverter} 单独处理</li>
-     * </ul>
-     * <p>
-     * <strong>失败不阻断</strong>：任何异常只记 warn，请求原样发出（与
-     * {@link RequestTextReplaceService} 的约定一致）。
-     * <p>
-     * <strong>执行时机</strong>：必须在文本替换<b>之前</b> —— 替换引擎只处理字符串 content，
-     * 遇到数组会跳过；先重排不影响替换结果，但保证替换能扫到 text 块。
-     *
-     * @param body OpenAI 请求体（原地修改）
-     */
-    @SuppressWarnings("unchecked")
-    private void normalizeMultimodalBlockOrder(Map<String, Object> body) {
-        Object messages = body.get("messages");
-        if (!(messages instanceof List<?> list)) {
-            return;
-        }
-        for (Object item : list) {
-            if (!(item instanceof Map<?, ?> m)) {
-                continue;
-            }
-            Object content = ((Map<String, Object>) m).get("content");
-            if (!(content instanceof List<?> blocks) || blocks.size() < 2) {
-                continue;
-            }
-            try {
-                // 收集 text 块与 image_url 块的位置
-                List<Object> texts = new ArrayList<>();
-                List<Object> images = new ArrayList<>();
-                List<Object> others = new ArrayList<>();
-                for (Object b : blocks) {
-                    if (!(b instanceof Map<?, ?> blk)) {
-                        others.add(b);
-                        continue;
-                    }
-                    // image_url 块可能缺 type 字段，故按"是否有 image_url 键"判定
-                    if (blk.containsKey("image_url")) {
-                        images.add(b);
-                    } else if ("text".equals(blk.get("type"))) {
-                        texts.add(b);
-                    } else {
-                        others.add(b);
-                    }
-                }
-                // 只处理"text 与 image 混排"的消息；其余保持原样
-                if (texts.isEmpty() || images.isEmpty()) {
-                    continue;
-                }
-                // 判断是否已经符合顺序：所有 text 都在所有 image 之前
-                int lastTextIdx = -1;
-                int firstImageIdx = Integer.MAX_VALUE;
-                for (int i = 0; i < blocks.size(); i++) {
-                    Object b = blocks.get(i);
-                    if (!(b instanceof Map<?, ?> blk)) {
-                        continue;
-                    }
-                    if (blk.containsKey("image_url")) {
-                        firstImageIdx = Math.min(firstImageIdx, i);
-                    } else if ("text".equals(blk.get("type"))) {
-                        lastTextIdx = Math.max(lastTextIdx, i);
-                    }
-                }
-                if (lastTextIdx < firstImageIdx) {
-                    // 已符合顺序（text 全在 image 之前），无需调整
-                    continue;
-                }
-                // 重排：text 块在前，image 块在后，其余块保持在末尾（相对顺序不变）
-                List<Object> reordered = new ArrayList<>(blocks.size());
-                reordered.addAll(texts);
-                reordered.addAll(images);
-                reordered.addAll(others);
-                ((Map<String, Object>) m).put("content", reordered);
-                log.info("[多模态] 已调整 content 块顺序：text×{} → image×{}（其余 {} 块保持末尾）",
-                        texts.size(), images.size(), others.size());
-            } catch (Exception e) {
-                log.warn("[多模态] content 块顺序调整失败，原样发出: {}", e.getMessage());
-            }
-        }
     }
 
     /**
