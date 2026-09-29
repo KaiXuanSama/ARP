@@ -121,6 +121,30 @@ const savingApiKey = ref(false)
 
 // ===== 扫码登录（2026-09 新增）=====
 
+/**
+ * 风险告知弹窗
+ * <p>
+ * 「扫码登录」需要用户把一个 `javascript:` 书签拖进书签栏，而该书签的本质
+ * 是「读取当前页面的凭证并发往指定地址」—— 这正是凭证窃取类恶意脚本的行为特征。
+ * 因此不少安全工具 / AI 分析都会将其标为高危。
+ * <p>
+ * 与其让用户在不知情的情况下执行，不如**先解释原理、明确风险、说明本服务性质**，
+ * 由用户显式确认后再继续。这既是安全义务，也让用户有能力识别真正的钓鱼链接。
+ */
+const showScanRiskNotice = ref(false)
+/** 用户已勾选「我已理解并确认」 */
+const riskAcknowledged = ref(false)
+
+/**
+ * 本服务的对外访问地址（用户在浏览器里实际访问的地址）
+ * <p>
+ * 用于风险弹窗里给用户一个"应该长什么样"的参照。
+ * 注意：不拿它跟链接里的 `arp` 做严格比较 —— 反代 / 开发端口（Vite 代理）
+ * 等场景下两者本就可能不同，那种差异是配置问题而非攻击信号，
+ * 严格比较会制造误报、让用户对真实风险脱敏。
+ */
+const currentOrigin = computed(() => window.location.origin)
+
 /** 扫码登录弹窗 */
 const showScanLogin = ref(false)
 /** 创建会话中 */
@@ -145,15 +169,37 @@ interface ScanLoginSession {
 }
 
 /**
- * 打开扫码登录弹窗并创建会话
+ * 「扫码登录」入口 —— 先展示风险告知，用户确认后才创建会话
+ * <p>
+ * 分两步是刻意的：{@link confirmScanRisk} 会真正创建会话并下发一次性 ticket，
+ * 而在用户读完风险说明前不应该做任何事。
+ */
+function openScanLogin(): void {
+  showChooser.value = false
+  riskAcknowledged.value = false
+  showScanRiskNotice.value = true
+}
+
+/** 关闭风险告知弹窗（未确认 → 什么都不做） */
+function closeScanRiskNotice(): void {
+  showScanRiskNotice.value = false
+  riskAcknowledged.value = false
+}
+
+/**
+ * 用户确认风险 → 创建登录会话并打开扫码弹窗
  * <p>
  * 流程：创建会话 → 展示链接与 ticket → 轮询等待新账号出现 → 自动关闭
  * <p>
  * 之所以在前端轮询而非等回调：书签脚本是**跨域** POST 到后端的，
  * 前端拿不到该请求的完成事件。轮询账号列表是唯一可靠的检测方式。
  */
-async function openScanLogin(): Promise<void> {
-  showChooser.value = false
+async function confirmScanRisk(): Promise<void> {
+  if (!riskAcknowledged.value) {
+    message.warning('请先勾选「我已阅读并理解上述风险」')
+    return
+  }
+  showScanRiskNotice.value = false
   showScanLogin.value = true
   creatingSession.value = true
   scanSession.value = null
@@ -1746,6 +1792,169 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
       </template>
     </n-modal>
 
+    <!--
+      扫码登录前风险告知
+      <p>
+      「扫码登录」需要用户把 javascript: 书签拖进书签栏，而该书签的本质是
+      「读取当前页面的凭证并发往指定地址」—— 这正是凭证窃取类恶意脚本的行为特征，
+      因此安全工具/AI 分析会将其标为高危。这个弹窗的作用是：
+        ① 把脚本到底做了什么讲清楚（而不是让用户黑盒地跑一个高危脚本）
+        ② 说明它为什么不是后门，以及真正的钓鱼风险在哪
+        ③ 强调本服务开源、免费、自托管，凭证不经过第三方
+        ④ 让用户显式确认后继续
+    -->
+    <n-modal v-model:show="showScanRiskNotice" preset="card"
+      style="width:660px; max-height: calc(100vh - 80px);" :mask-closable="false" @close="closeScanRiskNotice">
+      <!--
+        自定义标题栏：naive-ui 的 preset="card" 会原样转发 #header 插槽到 NCard。
+        加一句「真的不长」是刻意的——用户看到"风险说明"四个字的第一反应是跳过，
+        但这段内容正是他判断"该不该跑这个高危脚本"的全部依据，
+        而且是识别钓鱼链接的唯一途径。用一句轻量的提示降低跳过率，比长篇说教有效。
+      -->
+      <template #header>
+        <div class="risk-header">
+          <span class="risk-header-title">扫码登录 · 请先阅读风险说明</span>
+          <span class="risk-header-hint">真的不长，建议第一次时看完</span>
+        </div>
+      </template>
+
+      <n-scrollbar style="max-height: calc(100vh - 280px);">
+        <div class="risk-doc">
+          <n-alert type="warning" :show-icon="true" style="margin-bottom:14px;">
+            接下来的操作需要你把一个 <code>javascript:</code> 书签拖进书签栏。
+            <b>这类脚本的通用特征就是「读取页面数据并发往指定地址」</b>，
+            因此很容易被安全工具或 AI 判定为高危（凭证窃取类）。
+            下面说明它在本项目中的真实行为与风险边界，请读完再决定是否继续。
+          </n-alert>
+
+          <h4>书签脚本到底做了什么</h4>
+          <ol>
+            <li>从<b>当前登录页 URL</b> 读取 <code>state</code>、<code>arp</code>、<code>ticket</code> 三个参数</li>
+            <li>用当前页面的登录会话 Cookie，请求 CodeBuddy 官方的
+              <code>POST /console/login/enterprise?state=...</code>
+              —— 这是<b>官方登录流程自身</b>用来换取明文凭证的接口</li>
+            <li>拿到返回的 <code>accessToken</code> / <code>refreshToken</code></li>
+            <li>把凭证 POST 到 <code>arp</code> 参数指定的地址（即<b>本服务</b>）的
+              <code>/api/accounts/import-token</code></li>
+          </ol>
+          <p class="risk-note">
+            脚本<b>只</b>访问这两个地址（当前站点的官方接口 + 本服务），
+            不会读取 <code>document.cookie</code>、不加载任何远程代码、无第三方外联。
+          </p>
+
+          <h4>真实存在的风险</h4>
+          <n-table size="small" :bordered="false" style="margin-bottom:10px;">
+            <thead>
+              <tr>
+                <th style="width:130px">风险点</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><b>凭证被外传</b></td>
+                <td>
+                  脚本确实会把你账号的 <code>accessToken</code> / <code>refreshToken</code>
+                  发送到 URL 里的 <code>arp</code> 地址。<br>
+                  <b>前提是你信任该地址就是本服务</b> —— 见下方「这是本服务吗」
+                </td>
+              </tr>
+              <tr>
+                <td><b>钓鱼链接</b><br /><span class="tag-bad">最需要防范</span></td>
+                <td>
+                  攻击者可以在自己的部署里点「扫码登录」，生成一条带<b>他</b>的
+                  <code>arp</code> 与 <code>ticket</code> 的登录链接发给你。
+                  你若照常扫码并点书签，凭证就会回传到他那里。<br>
+                  <b>因此：只使用你自己打开的本服务页面生成的登录链接</b>，
+                  不要点击别人发来的登录链接。
+                </td>
+              </tr>
+              <tr>
+                <td><b>剪贴板 / 控制台</b></td>
+                <td>
+                  脚本在回传失败时会把含明文凭证的 JSON 复制到剪贴板并打印到控制台
+                  （作为手动兜底）。剪贴板可被其他程序读取，控制台内容可能出现在截图里。
+                </td>
+              </tr>
+              <tr>
+                <td><b>书签权限</b></td>
+                <td>
+                  <code>javascript:</code> 书签在<b>当前页面</b>的上下文里执行。
+                  只在 CodeBuddy 官方登录页上点击它。
+                </td>
+              </tr>
+            </tbody>
+          </n-table>
+
+          <h4>这是本服务吗</h4>
+          <div class="risk-service-box">
+            <div>
+              你当前访问的是：<code>{{ currentOrigin }}</code>
+            </div>
+            <div style="margin-top:6px;">
+              <b>登录链接里的 <code>arp</code> 参数必须指向你自己的部署地址。</b>
+              在进入下一步后，请展开链接确认 <code>arp=</code> 后面的内容是不是你信任的地址
+              （本地部署通常是 <code>http://localhost:8351</code>）。
+            </div>
+            <div class="risk-note" style="margin-top:8px;">
+              书签脚本会把凭证发送到 <code>arp</code> 参数指定的地址。
+              如果你不确定这个链接从哪来，<b>请关闭本弹窗，自己重新生成</b>。
+            </div>
+          </div>
+
+          <h4>关于本服务</h4>
+          <ul>
+            <li><b>开源免费</b>：ARP（AgentreProxy）是完全开源项目，代码公开可审计，无任何付费项、无账号体系、无遥测上报</li>
+            <li><b>自托管</b>：凭证只保存在<b>你自己部署的这个实例</b>的本地 SQLite 数据库中，作者与任何第三方都无法访问</li>
+            <li><b>非官方</b>：本项目与腾讯 / CodeBuddy 官方无任何关联、授权或背书关系</li>
+          </ul>
+
+          <n-alert type="default" :show-icon="false" style="margin-top:12px;">
+            <div style="font-size:12px; line-height:1.8;">
+              <b>免责声明</b>：本工具按「现状」提供，不承诺稳定性、可用性与安全性。
+              使用本工具访问上游服务可能违反其用户协议，由此产生的账号封禁、功能限制、
+              数据丢失等后果由使用者自行承担。请仅用于个人学习研究，建议在测试账号上先行验证。
+              如不同意上述任何条款，请立即停止使用。
+            </div>
+          </n-alert>
+
+          <!--
+            确认勾选框
+            <p>
+            用 n-checkbox 的**默认插槽**承载文案（而不是写在外面）：
+            n-checkbox 会把插槽内容渲染成 label 并与之关联，
+            点击文字即等同于点击方框。若把文案放外面，checkbox 内部就没有可点区域，
+            `aria-checked` 永远不变、点不动。
+            <p>
+            文案里不直接写 URL 而是用 <code> 包裹 —— `.risk-doc code` 的
+            `word-break: break-all` 会把 `http://localhost:5174` 从中间劈开，
+            故这里用不受该规则影响的 <span class="risk-ack-origin">。
+          -->
+          <div class="risk-ack">
+            <n-checkbox v-model:checked="riskAcknowledged" class="risk-ack-box">
+              <div class="risk-ack-text">
+                <div>
+                  我已阅读并理解上述风险，确认即将使用的<b>书签</b>与<b>登录链接</b>
+                  均由我自己打开的本服务页面生成：
+                </div>
+                <span class="risk-ack-origin">{{ currentOrigin }}</span>
+                <div class="risk-ack-note">且我没有从他人处接收过登录链接</div>
+              </div>
+            </n-checkbox>
+          </div>
+        </div>
+      </n-scrollbar>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="closeScanRiskNotice">取消</n-button>
+          <n-button type="primary" :disabled="!riskAcknowledged" @click="confirmScanRisk">
+            我已理解，继续
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
     <!--扫码登录 -->
     <n-modal v-model:show="showScanLogin" preset="card" title="扫码登录添加账户" style="width:640px;"
       :mask-closable="false" @close="closeScanLogin">
@@ -1760,6 +1969,11 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
               </div>
               <div><b>② 点「打开登录页」</b>，用手机微信扫描页面上的二维码完成登录</div>
               <div><b>③ 点书签栏里的「导入到 ARP」</b> → 凭证自动回传，本弹窗检测到后自动关闭</div>
+              <div style="margin-top:6px;">
+                <n-button text type="primary" size="tiny" @click="showScanRiskNotice = true">
+                  查看书签脚本原理与风险说明
+                </n-button>
+              </div>
             </div>
           </n-alert>
 
@@ -1961,6 +2175,170 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
   justify-content: space-between;
   gap: 12px;
   line-height: 1.7;
+}
+
+/*
+ * 风险告知文档（扫码登录取证前）
+ * <p>
+ * 内容较长，用紧凑排版让用户能在不滚动太多次的情况下读完关键部分。
+ * 标题层级刻意只到 h4 —— 弹窗标题已占 h3 层级，再深会让层级混乱。
+ */
+.risk-doc {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #333;
+}
+
+.risk-doc h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 18px 0 8px;
+  color: #1f2329;
+  padding-left: 8px;
+  border-left: 3px solid #1a7fbf;
+}
+
+.risk-doc h4:first-child {
+  margin-top: 0;
+}
+
+.risk-doc ol,
+.risk-doc ul {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.risk-doc li {
+  margin-bottom: 4px;
+}
+
+.risk-doc code {
+  background: #f2f3f5;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  word-break: break-all;
+}
+
+/* 补充说明：比正文弱一档，用于"注意但非重点"的信息 */
+.risk-note {
+  font-size: 12px;
+  color: #666;
+  background: #fafbfc;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 8px 0 0;
+  line-height: 1.7;
+}
+
+/* 强调"这是最需要防范的风险" */
+.tag-bad {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #d03050;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.risk-service-box {
+  background: #f0f9ff;
+  border: 1px solid #cfe9fb;
+  border-radius: 6px;
+  padding: 12px 14px;
+  line-height: 1.8;
+}
+
+/* 标题栏：主标题 + 轻量的"建议读完"提示 */
+.risk-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.risk-header-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1f2329;
+}
+
+.risk-header-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: #f02020;
+  background: #fdecec;
+  border: 1px solid #fbb8b8;
+  border-radius: 10px;
+  padding: 2px 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/*
+ * 确认勾选框
+ * <p>
+ * 文案走 n-checkbox 的默认插槽（这样点文字 = 点方框），
+ * 因此这里只需让 label 占满剩余宽度、并保证方框与首行文字对齐。
+ */
+.risk-ack {
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: #fafbfc;
+  border: 1px solid #ececf0;
+  border-radius: 6px;
+  transition: background .12s ease, border-color .12s ease;
+}
+
+.risk-ack:hover {
+  background: #f5f6f8;
+  border-color: #d9dadd;
+}
+
+/* n-checkbox 默认 inline-flex + align-items:flex-start；
+   让 label 撑满，方框靠顶部对齐（multi-line 文案时方框应与首行居中） */
+.risk-ack :deep(.n-checkbox) {
+  width: 100%;
+  align-items: flex-start;
+}
+
+.risk-ack :deep(.n-checkbox__label) {
+  flex: 1;
+  min-width: 0;
+  padding-left: 8px;
+}
+
+/* 方框与首行文字（13px / line-height 1.7 ≈ 22px）视觉居中对齐 */
+.risk-ack :deep(.n-checkbox-box-wrapper) {
+  margin-top: 2px;
+}
+
+.risk-ack-text {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* 地址单独成行：等宽字体 + 不参与 break-all 断词（否则会被劈成 htt / p://...） */
+.risk-ack-origin {
+  display: inline-block;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #1a7fbf;
+  background: #eaf6fd;
+  border-radius: 4px;
+  padding: 2px 8px;
+  margin: 4px 0;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.risk-ack-note {
+  color: #8c8c8c;
+  font-size: 12px;
 }
 
 .table-card {
