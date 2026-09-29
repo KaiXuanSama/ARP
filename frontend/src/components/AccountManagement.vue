@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onMounted, ref, type VNode } from 'vue'
+import { computed, h, nextTick, onMounted, onUnmounted, ref, type VNode } from 'vue'
 import {
   NButton,
   NCard,
@@ -111,6 +111,221 @@ const showAccessToken = ref(false)
 const showApiKeyForm = ref(false)
 const apiKeyForm = ref<ApiKeyOnlyPayload>({ nickname: '', apiKey: '' })
 const savingApiKey = ref(false)
+
+// ===== 扫码登录（2026-09 新增）=====
+
+/** 扫码登录弹窗 */
+const showScanLogin = ref(false)
+/** 创建会话中 */
+const creatingSession = ref(false)
+/** 当前登录会话 */
+const scanSession = ref<ScanLoginSession | null>(null)
+/** 剩余秒数（倒计时） */
+const scanRemaining = ref(0)
+/** 前端轮询查新账号的定时器 */
+let scanPollTimer: number | null = null
+/** 倒计时定时器 */
+let scanCountdownTimer: number | null = null
+/** 轮询时记录的基线账号 id 集合（用于识别新增） */
+let scanBaselineIds = new Set<number>()
+
+/** 后端 /api/accounts/login-session 的响应 */
+interface ScanLoginSession {
+  state: string
+  loginUrl: string
+  ticket: string
+  expiresAt: number
+}
+
+/**
+ * 打开扫码登录弹窗并创建会话
+ * <p>
+ * 流程：创建会话 → 展示链接与 ticket → 轮询等待新账号出现 → 自动关闭
+ * <p>
+ * 之所以在前端轮询而非等回调：书签脚本是**跨域** POST 到后端的，
+ * 前端拿不到该请求的完成事件。轮询账号列表是唯一可靠的检测方式。
+ */
+async function openScanLogin(): Promise<void> {
+  showChooser.value = false
+  showScanLogin.value = true
+  creatingSession.value = true
+  scanSession.value = null
+  scanRemaining.value = 0
+
+  try {
+    const res = await authFetch('/api/accounts/login-session', { method: 'POST' })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(body?.message || `请求失败: ${res.status}`)
+    }
+    scanSession.value = body as ScanLoginSession
+
+    // 记录当前账号 id 作为基线，后续多出的即为新导入的
+    // 先确保列表已加载，否则基线为空集会误判已有账号为"新增"
+    await accountStore.ensureAccountsLoaded()
+    scanBaselineIds = new Set(accountStore.view.map((a) => a.id))
+
+    startScanCountdown()
+    startScanPolling()
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(`创建登录会话失败: ${msg}`)
+    showScanLogin.value = false
+  } finally {
+    creatingSession.value = false
+  }
+}
+
+/** 倒计时（显示 ticket 剩余有效时间） */
+function startScanCountdown(): void {
+  stopScanCountdown()
+  const tick = () => {
+    if (!scanSession.value) return
+    const left = Math.max(0, Math.floor((scanSession.value.expiresAt - Date.now()) / 1000))
+    scanRemaining.value = left
+    if (left <= 0) {
+      stopScanCountdown()
+    }
+  }
+  tick()
+  scanCountdownTimer = window.setInterval(tick, 1000)
+}
+
+function stopScanCountdown(): void {
+  if (scanCountdownTimer !== null) {
+    window.clearInterval(scanCountdownTimer)
+    scanCountdownTimer = null
+  }
+}
+
+/**
+ * 轮询账号列表，检测扫码导入是否完成
+ * <p>
+ * 每 3 秒刷新一次 store；发现新账号（id 不在基线集合中）即认为导入成功。
+ * 超过 ticket 有效期后停止（此时 ticket 已失效，即便回传也会被拒）。
+ * <p>
+ * 之所以用轮询而非等回调：书签脚本是**跨域** POST 到后端的，
+ * 前端拿不到该请求的完成事件。轮询是唯一可靠的检测方式。
+ */
+function startScanPolling(): void {
+  stopScanPolling()
+  scanPollTimer = window.setInterval(async () => {
+    if (scanRemaining.value <= 0) {
+      stopScanPolling()
+      return
+    }
+    try {
+      // loadAccounts 内部走 store：先同步缓存、再后台拉服务器，因此新账号会在下一轮（≤3s）出现
+      await loadAccounts()
+      const fresh = accountStore.view.filter((a: AccountDataView) => !scanBaselineIds.has(a.id))
+      if (fresh.length > 0) {
+        const names = fresh.map((a) => a.nickname || a.uid).join('、')
+        message.success(`已导入 ${fresh.length} 个账号：${names}`)
+        closeScanLogin()
+        await refreshExtras()
+      }
+    } catch (e) {
+      // 轮询失败静默忽略，下个周期重试
+    }
+  }, 3000)
+}
+
+function stopScanPolling(): void {
+  if (scanPollTimer !== null) {
+    window.clearInterval(scanPollTimer)
+    scanPollTimer = null
+  }
+}
+
+function closeScanLogin(): void {
+  showScanLogin.value = false
+  scanSession.value = null
+  scanRemaining.value = 0
+  stopScanCountdown()
+  stopScanPolling()
+}
+
+/** 复制登录链接到剪贴板（用于在无二维码的情况下手动打开） */
+async function copyLoginUrl(): Promise<void> {
+  const url = scanSession.value?.loginUrl
+  if (!url) return
+  try {
+    await navigator.clipboard.writeText(url)
+    message.success('登录链接已复制')
+  } catch (e) {
+    message.error('复制失败，请手动选中链接复制')
+  }
+}
+
+/** 在新标签页打开登录链接 */
+function openLoginUrl(): void {
+  const url = scanSession.value?.loginUrl
+  if (url) {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+}
+
+/** 显示剩余时间（mm:ss） */
+const scanRemainingText = computed(() => {
+  const s = scanRemaining.value
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${m}:${String(sec).padStart(2, '0')}`
+})
+
+/** 手动粘贴的凭证 JSON（书签方案不可用时的兜底） */
+const manualTokenJson = ref('')
+const submittingManual = ref(false)
+
+/**
+ * 手动提交粘贴的凭证 JSON
+ * <p>
+ * 把书签脚本打印的 JSON 贴进来，转发到 {@code /api/accounts/import-token}。
+ * 该端点免管理 token（靠 ticket 自鉴权），因此这里用裸 fetch —— 但它同源，
+ * 是否带 token 都无所谓；用 authFetch 保持一致。
+ */
+async function submitManualToken(): Promise<void> {
+  const raw = manualTokenJson.value.trim()
+  if (!raw) {
+    message.warning('请先粘贴脚本输出的 JSON')
+    return
+  }
+  if (!scanSession.value?.ticket) {
+    message.error('会话已失效，请关闭后重新生成')
+    return
+  }
+
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    message.error('JSON 解析失败，请确认完整复制了脚本输出')
+    return
+  }
+
+  submittingManual.value = true
+  try {
+    const res = await authFetch('/api/accounts/import-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...parsed, ticket: scanSession.value.ticket }),
+    })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(body?.message || `导入失败: ${res.status}`)
+    }
+    message.success('凭证已导入')
+    manualTokenJson.value = ''
+    closeScanLogin()
+    await loadAccounts()
+    await refreshExtras()
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    message.error(msg)
+  } finally {
+    submittingManual.value = false
+  }
+}
 
 /** 流量包明细弹窗 */
 const showPackages = ref(false)
@@ -985,6 +1200,12 @@ onMounted(async () => {
   await queryCheckinStatus()
 })
 
+// 组件卸载时清理扫码登录的定时器，避免泄漏（尤其是轮询会一直发请求）
+onUnmounted(() => {
+  stopScanCountdown()
+  stopScanPolling()
+})
+
 // ============== 签到历史日志模态框 ==============
 
 /**
@@ -1241,9 +1462,21 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
         :row-key="(row: PackageRow) => `${row.accountId}-${row.package.packageCode || 'empty'}-${row.package.cycleEndTime || '0'}`" />
     </n-card>
 
-    <!--三入口选择 -->
+    <!--添加账户入口 -->
     <n-modal v-model:show="showChooser" preset="card" title="添加账户" style="width:520px;">
       <div class="entry-list">
+        <button class="entry-item entry-item--recommended" type="button" @click="openScanLogin">
+          <div class="entry-icon">
+            <Icon name="qrcode" :size="20" />
+          </div>
+          <div class="entry-body">
+            <div class="entry-title">
+              扫码登录
+              <span class="entry-tag">推荐</span>
+            </div>
+            <div class="entry-desc">用手机扫码登录 CodeBuddy，自动获取凭证（新版客户端已加密 info 文件，请优先用此方式）</div>
+          </div>
+        </button>
         <button class="entry-item" type="button" @click="loadFromLocal">
           <div class="entry-icon">
             <Icon name="logo" :size="20" />
@@ -1333,6 +1566,74 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
         <n-space justify="end">
           <n-button @click="showApiKeyForm = false" :disabled="savingApiKey">取消</n-button>
           <n-button type="primary" :loading="savingApiKey" @click="saveApiKeyOnly">保存</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!--扫码登录 -->
+    <n-modal v-model:show="showScanLogin" preset="card" title="扫码登录添加账户" style="width:600px;"
+      :mask-closable="false" @close="closeScanLogin">
+      <n-spin :show="creatingSession">
+        <template v-if="scanSession">
+          <n-alert type="info" :show-icon="true" style="margin-bottom:16px;">
+            <div style="line-height:1.7;">
+              <b>操作步骤</b>
+              <div>① 点击下方「打开登录页」，用手机微信扫描页面上的二维码</div>
+              <div>② 登录成功停留在该页面，点击书签栏里的
+                <code>导入到 ARP</code>（见 <code>tools/codebuddy-login-helper.js</code>）
+              </div>
+              <div>③ 凭证会自动回传，本弹窗检测到新账号后自动关闭</div>
+            </div>
+          </n-alert>
+
+          <n-form-item label="登录链接" label-placement="top" :show-feedback="false">
+            <n-input :value="scanSession.loginUrl" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" readonly
+              @focus="($event: FocusEvent) => ($event.target as HTMLTextAreaElement)?.select()" />
+          </n-form-item>
+
+          <n-space style="margin-bottom:16px;">
+            <n-button type="primary" @click="openLoginUrl">
+              <template #icon>
+                <Icon name="logo" :size="16" />
+              </template>
+              打开登录页
+            </n-button>
+            <n-button @click="copyLoginUrl">
+              <template #icon>
+                <Icon name="copy" :size="16" />
+              </template>
+              复制链接
+            </n-button>
+            <n-tag :type="scanRemaining > 60 ? 'success' : 'warning'" size="medium">
+              票据剩余 {{ scanRemainingText }}
+            </n-tag>
+          </n-space>
+
+          <n-alert v-if="scanRemaining <= 0" type="warning" :show-icon="true" style="margin-bottom:16px;">
+            票据已过期，请关闭后重新点击「扫码登录」生成新的链接。
+          </n-alert>
+          <n-text v-else depth="3" style="font-size:13px;">
+            正在等待凭证回传…（每 3 秒检查一次，导入成功后会自动关闭并刷新列表）
+          </n-text>
+
+          <n-collapse style="margin-top:16px;">
+            <n-collapse-item title="没有书签？点这里看手动方案" name="manual">
+              <div style="line-height:1.8; font-size:13px;">
+                <div>① 打开登录页并扫码登录，停留在登录成功页</div>
+                <div>② 按 <code>F12</code> 打开控制台，粘贴并运行 <code>tools/codebuddy-login-helper.js</code> 全文</div>
+                <div>③ 脚本会打印一段 JSON（并自动复制到剪贴板），把它贴到下方然后提交：</div>
+                <n-input v-model:value="manualTokenJson" type="textarea" :autosize="{ minRows: 4, maxRows: 8 }"
+                  placeholder='{"uid":"...","nickname":"...","accessToken":"eyJ..."}' style="margin:8px 0;" />
+                <n-button size="small" :loading="submittingManual" @click="submitManualToken">提交</n-button>
+              </div>
+            </n-collapse-item>
+          </n-collapse>
+        </template>
+      </n-spin>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="closeScanLogin">关闭</n-button>
         </n-space>
       </template>
     </n-modal>
@@ -1498,6 +1799,37 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
 .entry-item:hover {
   background: #f2f3f5;
   border-color: #d9dadd;
+}
+
+/* 推荐入口（扫码登录）—— 用主题色描边与高亮图标，视觉上引导优先选它 */
+.entry-item--recommended {
+  background: #f0f9ff;
+  border-color: #7ec8f5;
+}
+
+.entry-item--recommended:hover {
+  background: #e3f4fd;
+  border-color: #4ab3ef;
+}
+
+.entry-item--recommended .entry-icon {
+  background: #1a7fbf;
+}
+
+.entry-item--recommended .entry-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.entry-tag {
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #1a7fbf;
+  color: #fff;
 }
 
 .entry-icon {
