@@ -27,6 +27,9 @@ import type {
 } from '../utils/accountExtras'
 import { useAccountData, type AccountDataView } from '../composables/useAccountData'
 import { authFetch } from '../utils/auth'
+// 书签脚本正文：?raw 让 Vite 以字符串形式内联，避免额外网络请求
+// 单一来源 —— 该文件既是「书签代码」也是「控制台粘贴脚本」，改一处即可
+import bookmarkScript from '../assets/arp-bookmark.js?raw'
 
 interface WorkbuddyInfo {
   account?: {
@@ -272,6 +275,39 @@ const scanRemainingText = computed(() => {
   const sec = s % 60
   return `${m}:${String(sec).padStart(2, '0')}`
 })
+
+/**
+ * 书签的 {@code javascript:} URL
+ * <p>
+ * 用 {@code encodeURIComponent} 整体编码脚本正文 —— 语义 100% 保留
+ * （不像"去注释 + 压行"那样有破坏语法或改变语义的风险），
+ * 代价只是长度翻倍（本脚本约 7KB → 编码后约 18KB）。
+ * <p>
+ * <b>为什么不在 URL 里塞 arp / ticket</b>：那会让书签绑死在某一次登录会话上。
+ * 实际做法是脚本从**当前页面 URL** 读取这两个参数（由 ARP 生成的登录链接带上），
+ * 因此一个书签可以永久复用。
+ */
+const bookmarkHref = computed(() => `javascript:${encodeURIComponent(bookmarkScript)}`)
+
+/** 把书签代码复制到剪贴板（用户在书签栏手动新建书签后粘贴） */
+async function copyBookmarkCode(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(bookmarkHref.value)
+    message.success('书签代码已复制。请在书签栏新建书签，把代码粘贴到「网址」栏')
+  } catch (e) {
+    message.error('复制失败，请手动选中下方代码复制')
+  }
+}
+
+/**
+ * 点击（而非拖拽）书签时的引导
+ * <p>
+ * 管理面板自己的页面也带 state/arp/ticket 吗？不带 —— 这里点下去脚本会因
+ * 缺少 ticket 而报错弹浮层，反而困惑用户。因此点击时只给指引，不执行。
+ */
+function hintBookmarkDrag(): void {
+  message.info('请把这个按钮「拖拽」到浏览器书签栏 —— 然后在 CodeBuddy 登录成功页点击该书签', { duration: 6000 })
+}
 
 /** 手动粘贴的凭证 JSON（书签方案不可用时的兜底） */
 const manualTokenJson = ref('')
@@ -1571,27 +1607,46 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
     </n-modal>
 
     <!--扫码登录 -->
-    <n-modal v-model:show="showScanLogin" preset="card" title="扫码登录添加账户" style="width:600px;"
+    <n-modal v-model:show="showScanLogin" preset="card" title="扫码登录添加账户" style="width:640px;"
       :mask-closable="false" @close="closeScanLogin">
       <n-spin :show="creatingSession">
         <template v-if="scanSession">
-          <n-alert type="info" :show-icon="true" style="margin-bottom:16px;">
-            <div style="line-height:1.7;">
+          <!--第一步：装书签（只需做一次）-->
+          <n-alert type="info" :show-icon="true" style="margin-bottom:14px;">
+            <div style="line-height:1.75;">
               <b>操作步骤</b>
-              <div>① 点击下方「打开登录页」，用手机微信扫描页面上的二维码</div>
-              <div>② 登录成功停留在该页面，点击书签栏里的
-                <code>导入到 ARP</code>（见 <code>tools/codebuddy-login-helper.js</code>）
+              <div><b>① 安装书签</b>（仅首次）：把下方
+                <b>「导入到 ARP」</b>按钮<b>拖拽</b>到浏览器书签栏
               </div>
-              <div>③ 凭证会自动回传，本弹窗检测到新账号后自动关闭</div>
+              <div><b>② 点「打开登录页」</b>，用手机微信扫描页面上的二维码完成登录</div>
+              <div><b>③ 点书签栏里的「导入到 ARP」</b> → 凭证自动回传，本弹窗检测到后自动关闭</div>
             </div>
           </n-alert>
+
+          <!--书签安装区-->
+          <div class="bookmark-row">
+            <a class="bookmark-btn" :href="bookmarkHref" draggable="true"
+              @click.prevent="hintBookmarkDrag" title="按住拖拽到浏览器书签栏">
+              <Icon name="qrcode" :size="16" />
+              <span>导入到 ARP</span>
+            </a>
+            <n-button size="small" @click="copyBookmarkCode">
+              <template #icon>
+                <Icon name="copy" :size="14" />
+              </template>
+              复制书签代码
+            </n-button>
+            <n-text depth="3" style="font-size:12px;">← 拖到书签栏（或复制代码手动新建书签）</n-text>
+          </div>
+
+          <n-divider style="margin:14px 0;" />
 
           <n-form-item label="登录链接" label-placement="top" :show-feedback="false">
             <n-input :value="scanSession.loginUrl" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" readonly
               @focus="($event: FocusEvent) => ($event.target as HTMLTextAreaElement)?.select()" />
           </n-form-item>
 
-          <n-space style="margin-bottom:16px;">
+          <n-space style="margin-bottom:14px;">
             <n-button type="primary" @click="openLoginUrl">
               <template #icon>
                 <Icon name="logo" :size="16" />
@@ -1609,22 +1664,44 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
             </n-tag>
           </n-space>
 
-          <n-alert v-if="scanRemaining <= 0" type="warning" :show-icon="true" style="margin-bottom:16px;">
+          <n-alert v-if="scanRemaining <= 0" type="warning" :show-icon="true" style="margin-bottom:14px;">
             票据已过期，请关闭后重新点击「扫码登录」生成新的链接。
           </n-alert>
           <n-text v-else depth="3" style="font-size:13px;">
-            正在等待凭证回传…（每 3 秒检查一次，导入成功后会自动关闭并刷新列表）
+            正在等待凭证回传…（每 3 秒检查一次，导入成功后自动关闭并刷新列表）
           </n-text>
 
           <n-collapse style="margin-top:16px;">
-            <n-collapse-item title="没有书签？点这里看手动方案" name="manual">
+            <n-collapse-item title="书签用不了？点这里看替代方案" name="manual">
               <div style="line-height:1.8; font-size:13px;">
-                <div>① 打开登录页并扫码登录，停留在登录成功页</div>
-                <div>② 按 <code>F12</code> 打开控制台，粘贴并运行 <code>tools/codebuddy-login-helper.js</code> 全文</div>
-                <div>③ 脚本会打印一段 JSON（并自动复制到剪贴板），把它贴到下方然后提交：</div>
-                <n-input v-model:value="manualTokenJson" type="textarea" :autosize="{ minRows: 4, maxRows: 8 }"
-                  placeholder='{"uid":"...","nickname":"...","accessToken":"eyJ..."}' style="margin:8px 0;" />
-                <n-button size="small" :loading="submittingManual" @click="submitManualToken">提交</n-button>
+                <n-tabs type="line" size="small">
+                  <!--替代方案 A：控制台粘贴脚本（同样自动回传）-->
+                  <n-tab-pane name="console" tab="控制台运行脚本">
+                    <div>① 先点「打开登录页」并扫码登录，<b>停留在登录成功页</b></div>
+                    <div>② 按 <code>F12</code> 打开控制台（Console），粘贴下方代码回车</div>
+                    <n-input :value="bookmarkScript" type="textarea" :autosize="{ minRows: 3, maxRows: 6 }" readonly
+                      style="margin:8px 0;" @focus="($event: FocusEvent) => ($event.target as HTMLTextAreaElement)?.select()" />
+                    <n-space>
+                      <n-button size="small" @click="copyBookmarkCode">
+                        <template #icon>
+                          <Icon name="copy" :size="14" />
+                        </template>
+                        复制完整代码
+                      </n-button>
+                      <n-text depth="3" style="font-size:12px;">
+                        与书签功能相同，会自动回传（脚本从当前页面 URL 读 state / arp / ticket）
+                      </n-text>
+                    </n-space>
+                  </n-tab-pane>
+
+                  <!--替代方案 B：粘贴 JSON 手动提交（最终兜底）-->
+                  <n-tab-pane name="paste" tab="粘贴 JSON 提交">
+                    <div>脚本在任何环节失败时会打印一段 JSON（并复制到剪贴板），把它贴到下方提交：</div>
+                    <n-input v-model:value="manualTokenJson" type="textarea" :autosize="{ minRows: 4, maxRows: 8 }"
+                      placeholder='{"uid":"...","nickname":"...","accessToken":"eyJ..."}' style="margin:8px 0;" />
+                    <n-button size="small" :loading="submittingManual" @click="submitManualToken">提交</n-button>
+                  </n-tab-pane>
+                </n-tabs>
               </div>
             </n-collapse-item>
           </n-collapse>
@@ -1820,6 +1897,50 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/*
+ * 可拖拽书签按钮
+ * <p>
+ * 用 <a href="javascript:..."> 才能被浏览器识别为「可拖到书签栏」的链接 ——
+ * <button> 拖过去只会变成文本。样式上刻意做成"按钮外观"，让用户一眼看出可以拖。
+ */
+.bookmark-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  background: #f0f9ff;
+  border: 1px dashed #7ec8f5;
+  border-radius: 8px;
+}
+
+.bookmark-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 6px;
+  background: #1a7fbf;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: grab;
+  user-select: none;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .14);
+  transition: background .12s ease, transform .12s ease;
+}
+
+.bookmark-btn:hover {
+  background: #166b9f;
+}
+
+.bookmark-btn:active {
+  cursor: grabbing;
+  transform: scale(.97);
 }
 
 .entry-tag {
