@@ -7,6 +7,7 @@ import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
 import com.kaixuan.agentreproxy.service.RequestTextReplaceService;
 import com.kaixuan.agentreproxy.service.SettingsService;
+import com.kaixuan.agentreproxy.service.ToolCallPairingService;
 import com.kaixuan.agentreproxy.service.UpstreamClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,6 +61,7 @@ public class OpenAiController {
     private final ChatUsageRefreshScheduler usageRefreshScheduler;
     private final DownstreamApiKeyService downstreamApiKeyService;
     private final RequestTextReplaceService textReplaceService;
+    private final ToolCallPairingService toolCallPairingService;
     private final ObjectMapper objectMapper;
 
     /**
@@ -89,6 +91,7 @@ public class OpenAiController {
             ChatUsageRefreshScheduler usageRefreshScheduler,
             DownstreamApiKeyService downstreamApiKeyService,
             RequestTextReplaceService textReplaceService,
+            ToolCallPairingService toolCallPairingService,
             ObjectMapper objectMapper) {
         this.upstream = upstream;
         this.modelsConfig = modelsConfig;
@@ -96,6 +99,7 @@ public class OpenAiController {
         this.usageRefreshScheduler = usageRefreshScheduler;
         this.downstreamApiKeyService = downstreamApiKeyService;
         this.textReplaceService = textReplaceService;
+        this.toolCallPairingService = toolCallPairingService;
         this.objectMapper = objectMapper;
     }
 
@@ -154,6 +158,11 @@ public class OpenAiController {
                     downstreamApiKeyService.recordCall(ctx.keyId());
                     // 触发 3 分钟后的积分用量自动刷新(全局去重 —— 已有定时器则忽略)
                     usageRefreshScheduler.scheduleRefreshAfterChat(ctx.accountId());
+                    // 修复工具调用配对：部分下游客户端用工具读图时会漏发 role=tool 应答消息，
+                    // 上游对此零容忍（400/11148），这里补一条合成响应。
+                    // 放在文本替换之前 —— 这样替换服务日志里的"替换前/替换后"体
+                    // 与真正发往上游的请求完全一致，排查时不会出现"日志里没有、抓包里有"的错位。
+                    toolCallPairingService.repairDanglingToolCalls(body);
                     // 按用户配置的规则做文本替换（未配置时为空操作）
                     textReplaceService.applyToOpenAiBody(body);
                     return upstream.postChatStreamForAccount(ctx.accountId(), body)
