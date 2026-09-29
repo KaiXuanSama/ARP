@@ -28,6 +28,30 @@
 	</scm>
 	<properties>
 		<java.version>17</java.version>
+
+		<!--
+			前端构建的下载源（默认走国内镜像 registry.npmmirror.com）
+
+			[为什么改]
+			frontend-maven-plugin 默认从 nodejs.org 下载 Node.js 二进制、从
+			registry.npmjs.org 拉 npm 依赖。国内服务器 / 容器内实测均不通：
+			  - 容器 DNS 解析失败：Unknown host nodejs.org: Temporary failure in name resolution
+			  - 即使能连，速度也极慢（实测 Maven 中央仓库下 9MB 耗时 10 分钟）
+			国内镜像同样提供 linux-x64 / linux-arm64 / win-x64 全平台包，
+			路径结构与官方一致，改根地址即可。
+
+			[怎么覆盖]
+			海外环境想用官方源时，命令行覆盖即可，无需改本文件：
+			  ./mvnw -B clean package \
+			      -Dnode.download.root=https://nodejs.org/dist/ \
+			      -Dnpm.registry.url=https://registry.npmjs.org/
+
+			[注意]
+			npm 的 registry 只加在 "npm install" 上（见下方插件配置），
+			不要加到 "npm run build" 上 —— 后者会把 registry 参数透传给 vite。
+		-->
+		<node.download.root>https://registry.npmmirror.com/-/binary/node/</node.download.root>
+		<npm.registry.url>https://registry.npmmirror.com</npm.registry.url>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -74,6 +98,8 @@
 						<configuration>
 							<nodeVersion>v22.14.0</nodeVersion>
 							<workingDirectory>frontend</workingDirectory>
+							<!-- Node.js 下载源（默认国内镜像，见 properties 说明） -->
+							<nodeDownloadRoot>${node.download.root}</nodeDownloadRoot>
 						</configuration>
 					</execution>
 					<execution>
@@ -85,6 +111,8 @@
 						<configuration>
 							<arguments>install</arguments>
 							<workingDirectory>frontend</workingDirectory>
+							<!-- npm 依赖下载源（默认国内镜像，见 properties 说明） -->
+							<npmRegistryURL>${npm.registry.url}</npmRegistryURL>
 						</configuration>
 					</execution>
 					<execution>

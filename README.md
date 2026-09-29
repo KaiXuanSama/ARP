@@ -81,6 +81,36 @@ docker compose up -d --build
 ```
 首次构建会从源码编译 Spring Boot jar(包含前端 Vue 构建),约 5-10 分钟;后续 `docker compose up -d` 直接复用镜像缓存,秒级启动。
 
+> **构建期的下载源已默认走国内镜像**
+>
+> `frontend-maven-plugin` 需要下载 Node.js 二进制(npm 随 node 一起,无需单独下载)。
+> 默认源 `nodejs.org` 在国内服务器/容器内**不通**(实测报
+> `Unknown host nodejs.org: Temporary failure in name resolution`)。
+> 因此在 `pom.xml` 的 properties 里默认指向 `registry.npmmirror.com`:
+>
+> ```xml
+> <node.download.root>https://registry.npmmirror.com/-/binary/node/</node.download.root>
+> <npm.registry.url>https://registry.npmmirror.com</npm.registry.url>
+> ```
+>
+> 海外环境想换回官方源,三种方式任选:
+> ```bash
+> # ① Maven 命令行覆盖(本地构建)
+> ./mvnw -B clean package -Dnode.download.root=https://nodejs.org/dist/ \
+>                           -Dnpm.registry.url=https://registry.npmjs.org/
+>
+> # ② Docker build args(已在 Dockerfile 声明 ARG)
+> #    docker-compose.yml 的 build 段加:
+> #      args:
+> #        NODE_DOWNLOAD_ROOT: https://nodejs.org/dist/
+> #        NPM_REGISTRY_URL: https://registry.npmjs.org/
+>
+> # ③ 直接改 pom.xml 的两个 property
+> ```
+>
+> 想换其他镜像(如华为云 `https://mirrors.huaweicloud.com/nodejs/`)同理,
+> 只要保持 `{root}v22.14.0/node-v22.14.0-linux-<arch>.tar.gz` 的路径结构。
+
 **3. 查看实时日志(可选)**
 ```bash
 docker compose logs -f app

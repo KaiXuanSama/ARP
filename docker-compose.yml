@@ -22,8 +22,13 @@ services:
       context: .
       dockerfile: Dockerfile
       # 想强制不走缓存,改 --no-cache;想看完整编译输出,在外面加 --progress=plain
-      # args:  # 如需 docker build 时注入 --build-arg,在此处声明
-      #   HTTP_PROXY: http://host.docker.internal:7890
+      #
+      # 下载源已在 pom.xml 的 properties 里默认指向国内镜像
+      # (node.download.root / npm.registry.url),国内服务器无需额外配置。
+      # 需要临时换回官方源时,在这里用 args 覆盖(需 Dockerfile 有同名 ARG 才生效):
+      #   args:
+      #     NODE_DOWNLOAD_ROOT: https://nodejs.org/dist/
+      #     NPM_REGISTRY_URL: https://registry.npmjs.org/
     image: agentreproxy:latest
     container_name: agentreproxy
     restart: unless-stopped
