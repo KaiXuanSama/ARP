@@ -23,19 +23,32 @@ services:
       dockerfile: Dockerfile
       # 想强制不走缓存,改 --no-cache;想看完整编译输出,在外面加 --progress=plain
       #
-      # 下载源已在 pom.xml 的 properties 里默认指向国内镜像
-      # (node.download.root / npm.registry.url),国内服务器无需额外配置。
-      # 需要临时换回官方源时,在这里用 args 覆盖(需 Dockerfile 有同名 ARG 才生效):
-      #   args:
-      #     NODE_DOWNLOAD_ROOT: https://nodejs.org/dist/
-      #     NPM_REGISTRY_URL: https://registry.npmjs.org/
+      # 构建期所有下载源已默认指向国内镜像(pom.xml + .mvn/docker-settings.xml),
+      # 国内服务器无需额外配置。需要换回官方源时,在这里用 args 覆盖:
+      #   MAVEN_MIRROR_URL: https://repo.maven.apache.org/maven2   # Maven 依赖/插件
+      #   MVNW_REPOURL: https://repo.maven.apache.org/maven2       # Maven 发行包
+      #   NODE_DOWNLOAD_ROOT: https://nodejs.org/dist/             # Node 二进制
+      #   NPM_REGISTRY_URL: https://registry.npmjs.org/            # npm 依赖
+      #
+      # 注:前两个是 ENV 语义(被子进程读取),后两个是命令行 -D 展开。
+      args:
+        # 基础镜像仓库前缀(结尾需带斜杠)。留空 = Docker Hub 官方。
+        # 私有仓库/镜像加速场景在 .env 里配 IMAGE_REGISTRY 即可，勿改本文件
+        IMAGE_REGISTRY: ${IMAGE_REGISTRY:-}
+        # 以下四项留空即用镜像内默认值(国内镜像)；需要官方源时在 .env 里配
+        MAVEN_MIRROR_URL: ${MAVEN_MIRROR_URL:-}
+        MVNW_REPOURL: ${MVNW_REPOURL:-}
+        NODE_DOWNLOAD_ROOT: ${NODE_DOWNLOAD_ROOT:-}
+        NPM_REGISTRY_URL: ${NPM_REGISTRY_URL:-}
     image: agentreproxy:latest
     container_name: agentreproxy
     restart: unless-stopped
     tty: true
     stdin_open: false
     ports:
-      - "8351:8351"
+      # 宿主机端口可配(默认 8351)。改端口请在 .env 里配 HOST_PORT，勿改本文件。
+      # 容器内始终是 8351，改 .env 后无需动 Dockerfile 的 ENTRYPOINT。
+      - "${HOST_PORT:-8351}:8351"
     volumes:
       # 单一挂载点:数据库 + 模型配置全部落到 ./Config/
       # 容器内 /data 软链:

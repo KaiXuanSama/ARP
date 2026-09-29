@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Docker 构建专用 Maven settings（不影响本机 Windows 构建）
+
+  [为什么需要]
+  Dockerfile 里 `./mvnw -B dependency:go-offline` 需要从 Maven 中央仓库下载
+  插件与依赖。国内服务器/容器内实测 `repo.maven.apache.org` 反复出现：
+      repo.maven.apache.org: Temporary failure in name resolution
+  且成功时速度也仅 2.4 kB/s，一次构建动辄十几分钟。
+
+  [怎么用]
+  由 Dockerfile 以 `-s .mvn/docker-settings.xml` 显式传入，
+  因此本机 `.\mvnw.cmd package` 不会读到它（走各自的默认源）。
+
+  URL 取自环境变量 MAVEN_MIRROR_URL（Dockerfile 里用 ARG 给了默认值）。
+  想换回官方源，构建时覆盖该 ARG 即可：
+      docker compose build （通过 build.args 传 MAVEN_MIRROR_URL）
+
+  [镜像说明]
+  Aliyun public 仓库完整代理 Maven 中央仓库，无需账号。
+  mirrorOf = central 表示「只代理 central」，不干扰 POM 里声明的其他仓库。
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                              https://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+    <mirrors>
+        <mirror>
+            <id>central-mirror</id>
+            <name>Maven Central Mirror</name>
+            <url>${env.MAVEN_MIRROR_URL}</url>
+            <mirrorOf>central</mirrorOf>
+        </mirror>
+    </mirrors>
+
+</settings>

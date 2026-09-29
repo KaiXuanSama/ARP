@@ -72,6 +72,10 @@ src/main/resources/static/index.html
 .github/ISSUE_TEMPLATE
 .github/PULL_REQUEST_TEMPLATE
 
+# 部署本地配置（各服务器不同：私有镜像前缀、宿主机端口等）
+# 由 .env.example 复制而来，模板进版本库、实际配置不进
+.env
+
 # JSON files
 /*.json
 
