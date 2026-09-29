@@ -1,6 +1,8 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.dto.AccountResponse;
+import com.kaixuan.agentreproxy.dto.LoginSessionResponse;
+import com.kaixuan.agentreproxy.dto.TokenImportRequest;
 import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
 import com.kaixuan.agentreproxy.model.WorkbuddyDesktopInfo;
 import com.kaixuan.agentreproxy.repository.WorkbuddyAccountJdbcRepository;
@@ -8,12 +10,16 @@ import com.kaixuan.agentreproxy.service.AccountDeleteService;
 import com.kaixuan.agentreproxy.service.AccountEnabledService;
 import com.kaixuan.agentreproxy.service.AccountSaveService;
 import com.kaixuan.agentreproxy.service.AccountSaveService.SaveAction;
+import com.kaixuan.agentreproxy.service.LoginSessionService;
+import com.kaixuan.agentreproxy.service.TokenImportService;
 import com.kaixuan.agentreproxy.service.WorkbuddyInfoService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.multipart.FilePart;
+import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -22,6 +28,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -45,6 +52,8 @@ public class WorkbuddyInfoController {
     private final AccountDeleteService accountDeleteService;
     private final AccountEnabledService accountEnabledService;
     private final WorkbuddyAccountJdbcRepository accountRepository;
+    private final LoginSessionService loginSessionService;
+    private final TokenImportService tokenImportService;
     private final ObjectMapper objectMapper;
 
     public WorkbuddyInfoController(WorkbuddyInfoService workbuddyInfoService,
@@ -52,18 +61,80 @@ public class WorkbuddyInfoController {
                                    AccountDeleteService accountDeleteService,
                                    AccountEnabledService accountEnabledService,
                                    WorkbuddyAccountJdbcRepository accountRepository,
+                                   LoginSessionService loginSessionService,
+                                   TokenImportService tokenImportService,
                                    ObjectMapper objectMapper) {
         this.workbuddyInfoService = workbuddyInfoService;
         this.accountSaveService = accountSaveService;
         this.accountDeleteService = accountDeleteService;
         this.accountEnabledService = accountEnabledService;
         this.accountRepository = accountRepository;
+        this.loginSessionService = loginSessionService;
+        this.tokenImportService = tokenImportService;
         this.objectMapper = objectMapper;
     }
 
     @GetMapping("/workbuddy-info")
     public Mono<WorkbuddyDesktopInfo> getWorkbuddyInfo() {
         return Mono.fromCallable(workbuddyInfoService::readInfo);
+    }
+
+    // ============== 扫码登录（2026-09 新增） ==============
+
+    /**
+     * 创建扫码登录会话 — {@code POST /api/accounts/login-session}
+     * <p>
+     * 返回 state、登录链接、一次性 ticket 与过期时间。前端据此引导用户扫码：
+     * <pre>
+     * ① 用户点开登录链接 → CodeBuddy 登录页 → 手机扫码
+     * ② 登录成功后，点书签脚本「导入到 ARP」
+     * ③ 脚本凭 ticket 调 {@link #importToken} 回传明文 token
+     * </pre>
+     * <p>
+     * <b>需管理面板 token</b>（本端点会下发 ticket，是安全链的起点）。
+     */
+    @PostMapping("/accounts/login-session")
+    public Mono<LoginSessionResponse> createLoginSession() {
+        return Mono.fromCallable(loginSessionService::createSession);
+    }
+
+    /**
+     * 扫码登录凭证回传 — {@code POST /api/accounts/import-token}
+     * <p>
+     * 由浏览器书签脚本从 {@code codebuddy.cn} 登录页跨域调用，
+     * <b>不校验管理面板 token</b>（跨域带不上），改用一次性 ticket 自鉴权。
+     * 白名单见 {@code AuthWebFilter.requiresAuth}。
+     * <p>
+     * <b>CORS</b>：用 Spring 的 {@link CrossOrigin} 而非手写响应头 ——
+     * 手写 header 时，Spring 内置的 CORS 处理器会在进入方法<b>之前</b>返回
+     * {@code 403 Forbidden}（它找不到匹配的 CORS 配置），导致预检失败、
+     * 浏览器直接拦截真实请求。{@code @CrossOrigin} 会一并处理 OPTIONS 预检。
+     * <p>
+     * <b>为何不设 {@code allowCredentials}</b>：鉴权靠 ticket 而非 Cookie，
+     * 开启凭据反而扩大攻击面。前端脚本也应以 {@code credentials: 'omit'} 发起请求。
+     */
+    @PostMapping(value = "/accounts/import-token")
+    @CrossOrigin(
+            origins = "https://www.codebuddy.cn",
+            methods = { RequestMethod.POST, RequestMethod.OPTIONS },
+            allowedHeaders = { "Content-Type" },
+            allowCredentials = "false",
+            maxAge = 600
+    )
+    public Mono<ResponseEntity<Map<String, Object>>> importToken(
+            @RequestBody TokenImportRequest req) {
+        return Mono.fromCallable(() -> {
+            Map<String, Object> result = tokenImportService.importToken(req);
+            return ResponseEntity.ok().body(result);
+        }).onErrorResume(e -> {
+            HttpStatus status = (e instanceof IllegalArgumentException)
+                    ? HttpStatus.BAD_REQUEST
+                    : HttpStatus.INTERNAL_SERVER_ERROR;
+            return Mono.just(ResponseEntity.status(status)
+                    .body(Map.<String, Object>of(
+                            "status", "error",
+                            "message", e.getMessage() == null ? "导入失败" : e.getMessage())));
+        });
     }
 
     /**
