@@ -19,7 +19,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.multipart.FilePart;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -28,7 +27,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -101,26 +99,18 @@ public class WorkbuddyInfoController {
     /**
      * 扫码登录凭证回传 — {@code POST /api/accounts/import-token}
      * <p>
-     * 由浏览器书签脚本从 {@code codebuddy.cn} 登录页跨域调用，
+     * 由浏览器书签脚本从 {@code codebuddy.cn} 登录页跨域调用，也支持管理面板手动提交。
      * <b>不校验管理面板 token</b>（跨域带不上），改用一次性 ticket 自鉴权。
      * 白名单见 {@code AuthWebFilter.requiresAuth}。
      * <p>
-     * <b>CORS</b>：用 Spring 的 {@link CrossOrigin} 而非手写响应头 ——
-     * 手写 header 时，Spring 内置的 CORS 处理器会在进入方法<b>之前</b>返回
-     * {@code 403 Forbidden}（它找不到匹配的 CORS 配置），导致预检失败、
-     * 浏览器直接拦截真实请求。{@code @CrossOrigin} 会一并处理 OPTIONS 预检。
-     * <p>
-     * <b>为何不设 {@code allowCredentials}</b>：鉴权靠 ticket 而非 Cookie，
-     * 开启凭据反而扩大攻击面。前端脚本也应以 {@code credentials: 'omit'} 发起请求。
+     * <b>CORS</b>：不用 {@link CrossOrigin} / {@code CorsWebFilter} ——
+     * Spring 的内置 CORS 是「白名单外一律 403」，会把同源经 Vite 代理的请求
+     * （Origin 变成 {@code http://localhost:5174}）和反代部署场景一起拦死。
+     * 改由 {@link com.kaixuan.agentreproxy.config.ImportTokenCorsFilter}
+     * 按白名单补响应头且不拒绝请求。白名单通过
+     * {@code custom.login.allowed-origins} 配置（逗号分隔）。
      */
     @PostMapping(value = "/accounts/import-token")
-    @CrossOrigin(
-            origins = "https://www.codebuddy.cn",
-            methods = { RequestMethod.POST, RequestMethod.OPTIONS },
-            allowedHeaders = { "Content-Type" },
-            allowCredentials = "false",
-            maxAge = 600
-    )
     public Mono<ResponseEntity<Map<String, Object>>> importToken(
             @RequestBody TokenImportRequest req) {
         return Mono.fromCallable(() -> {

@@ -65,6 +65,12 @@ custom:
   #                   否则回传会失败(浏览器无法访问 localhost:8351)。
   #    version:     登录页的客户端版本号参数(上游当前为 5.1.7)。
   #                 上游若加强校验需同步更新。
+  #    allowed-origins: 凭证回传端点(/api/accounts/import-token)的 CORS 白名单,
+  #                     逗号分隔。只有这些来源才会收到 Access-Control-Allow-Origin 响应头。
+  #                     默认只放行 CodeBuddy 登录页(书签脚本的唯一来源)。
+  #                     管理面板自己的请求(同源 / Vite 代理)不需要白名单 ——
+  #                     过滤器只补响应头、不拒绝请求。
   login:
     self-origin: ${ARP_SELF_ORIGIN:http://localhost:8351}
     version: 5.1.7
+    allowed-origins: ${ARP_ALLOWED_ORIGINS:https://www.codebuddy.cn}

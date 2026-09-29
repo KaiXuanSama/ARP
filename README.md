@@ -90,6 +90,20 @@ docker compose logs -f app
 
 打开 `http://<服务器IP>:8351`。容器会把主机的 `8351` 端口映射到容器内 `8351`。
 
+> ⚠️ **要用「扫码登录」添加账号,必须设置 `ARP_SELF_ORIGIN`**
+>
+> 扫码登录会把本服务的对外地址写进登录链接(`arp` 参数),书签脚本据此把凭证回传回来。
+> Docker 部署时若不设置,该参数默认是 `localhost:8351` —— 用户浏览器无法访问,回传会失败。
+>
+> ```yaml
+> # docker-compose.yml
+> environment:
+>   ARP_SELF_ORIGIN: http://<你的域名或IP>:8351
+> ```
+>
+> 需要**其他网页**跨域调用回传端点时,再用 `ARP_ALLOWED_ORIGINS` 追加 CORS 白名单
+> (逗号分隔,默认仅 `https://www.codebuddy.cn`)。管理面板自己的请求不受此限制。
+
 **5. 升级到新版本**
 ```bash
 cd ARP
