@@ -64,6 +64,10 @@ interface AccountRow {
   accessToken: string | null
    enabled: boolean
   updatedAt: number
+  /** 凭证过期时间(毫秒时间戳);undefined/null = 无过期信息(API Key 账号) */
+  credentialExpiresAt?: number | null
+  /** refreshToken 过期时间(毫秒时间戳);用于提示"续期窗口还剩多久" */
+  refreshExpiresAt?: number | null
   credit?: CreditSnapshot
   usage?: UsageSnapshot
   checkin?: CheckinSnapshot
@@ -617,6 +621,22 @@ function compareEndTimeAsc(a: CreditPackage, b: CreditPackage): number {
 
 const checkinButtonLabel = computed(() => checkingIn.value ? '签到进行中…' : '一键每日签到')
 
+/**
+ * 需要提醒换新凭证的账号（已过期 或 剩余 ≤ 7 天）
+ * <p>
+ * 只统计「启用中」的账号 —— 已停用的账号不参与调用，过期也不影响服务，
+ * 提醒它们只会制造噪音。
+ * <p>
+ * 无过期信息的账号（API Key、旧数据）不计入，否则会永远挂着一条无法消除的警告。
+ */
+const expiringAccounts = computed<AccountRow[]>(() =>
+  tableData.value.filter((row) => {
+    if (!row.enabled) return false
+    const info = describeExpiry(row)
+    return info.level === 'warn' || info.level === 'expired'
+  })
+)
+
 const columns: DataTableColumns<AccountRow> = [
   { title: '编号', key: 'id', width: 70 },
  {
@@ -647,6 +667,33 @@ const columns: DataTableColumns<AccountRow> = [
       style: { fontFamily: "'SFMono-Regular',Consolas,'Liberation Mono',monospace", fontSize: '12px' },
       onClick: () => { void copyPrimaryCredential(row) },
     }, () => row.primaryCredential || '-'),
+  },
+  {
+    title: '凭证有效期',
+    key: 'credentialExpiry',
+    width: 110,
+    render: (row: AccountRow) => {
+      const info = describeExpiry(row)
+      if (info.level === 'unknown') {
+        return h('span', { style: { color: '#999' }, title: info.title }, info.text)
+      }
+      const COLORS: Record<string, string> = {
+        ok: '#18a058',
+        warn: '#f0a020',
+        expired: '#d03050',
+      }
+      // 用原生 title 属性而非 NTooltip：tooltip 需要 n-config-provider 注入，
+      // 在 NDataTable 的 render 函数里不可靠（控制台会报 injection not found）。
+      // 原生 title 零依赖、必定生效，且对本场景（一行简短说明）完全够用。
+      return h('span', {
+        style: {
+          color: COLORS[info.level],
+          fontWeight: info.level === 'ok' ? '400' : '500',
+          cursor: 'help',
+        },
+        title: info.title,
+      }, info.text)
+    },
   },
   {
     title: '积分剩余',
@@ -853,6 +900,8 @@ function buildRows(): AccountRow[] {
     accessToken: v.accessToken,
      enabled: v.enabled,
     updatedAt: v.updatedAt,
+    credentialExpiresAt: v.credentialExpiresAt,
+    refreshExpiresAt: v.refreshExpiresAt,
     credit: v.credit ?? undefined,
     usage: v.usage ?? undefined,
     checkin: v.checkin ?? undefined,
@@ -919,6 +968,80 @@ function maskToken(token: string): string {
 function formatTime(ts: number | null | undefined): string {
   if (!ts) return '-'
   return new Date(ts).toLocaleString('zh-CN')
+}
+
+/** 临期告警阈值（天）—— 低于此值在列表里高亮，提醒及时换新凭证 */
+const EXPIRY_WARN_DAYS = 7
+
+/**
+ * 凭证有效期的展示信息
+ * <ul>
+ *   <li>{@code level}: ok（> 7 天）/ warn（≤ 7 天）/ expired（已过期）/ unknown（无过期信息）</li>
+ *   <li>{@code text}: 列表里显示的主文案</li>
+ *   <li>{@code title}: tooltip 里的详细信息（含绝对时间与 refreshToken 情况）</li>
+ * </ul>
+ */
+interface ExpiryInfo {
+  level: 'ok' | 'warn' | 'expired' | 'unknown'
+  text: string
+  title: string
+}
+
+/**
+ * 计算凭证有效期的展示信息
+ * <p>
+ * 为什么用"天"而不是精确到小时：accessToken 有效期约 55 天，
+ * 精确到分钟没有实际意义，反而让列表变吵。临近过期（< 1 天）才切到小时粒度。
+ */
+function describeExpiry(row: AccountRow): ExpiryInfo {
+  const expiresAt = row.credentialExpiresAt
+  if (!expiresAt || expiresAt <= 0) {
+    return {
+      level: 'unknown',
+      text: '-',
+      title: row.apiKey
+        ? 'API Key 账号无过期时间'
+        : '该账号未记录有效期（旧版本导入或凭证不含 exp 字段）',
+    }
+  }
+
+  const now = Date.now()
+  const diffMs = expiresAt - now
+  const absTime = formatTime(expiresAt)
+  const refreshLine = row.refreshExpiresAt
+    ? `\nrefreshToken 到期：${formatTime(row.refreshExpiresAt)}（剩余 ${Math.max(0, Math.floor((row.refreshExpiresAt - now) / 86400000))} 天）`
+    : '\n无 refreshToken 记录'
+
+  if (diffMs <= 0) {
+    return {
+      level: 'expired',
+      text: '已过期',
+      title: `凭证已于 ${absTime} 过期，该账号将无法调用上游，请重新扫码登录导入${refreshLine}`,
+    }
+  }
+
+  const days = Math.floor(diffMs / 86400000)
+  const hours = Math.floor(diffMs / 3600000)
+
+  if (hours < 24) {
+    return {
+      level: 'warn',
+      text: `剩 ${hours} 小时`,
+      title: `凭证将于 ${absTime} 过期（不足 1 天），请尽快重新扫码登录${refreshLine}`,
+    }
+  }
+  if (days <= EXPIRY_WARN_DAYS) {
+    return {
+      level: 'warn',
+      text: `剩 ${days} 天`,
+      title: `凭证将于 ${absTime} 过期（${days} 天后），建议尽快重新扫码登录导入${refreshLine}`,
+    }
+  }
+  return {
+    level: 'ok',
+    text: `剩 ${days} 天`,
+    title: `凭证将于 ${absTime} 过期${refreshLine}`,
+  }
 }
 
 const allCheckedIn = computed(() => {
@@ -1483,6 +1606,23 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
       </div>
     </div>
 
+    <!--
+      临期/过期凭证汇总提示
+      <p>
+      只在「有需要处理的账号」时出现 —— 平时不占视觉空间。
+      accessToken 有效期约 55 天，不提醒很容易忘记，直到某天账号静默失效。
+      点击可让用户立刻去重新扫码（跳转到添加账户弹窗）。
+    -->
+    <n-alert v-if="expiringAccounts.length > 0" type="warning" :show-icon="true" class="expiry-alert">
+      <div class="expiry-alert-body">
+        <span>
+          有 <b>{{ expiringAccounts.length }}</b> 个账号的凭证即将过期或已过期：
+          {{ expiringAccounts.map((r) => r.nickname || r.uid).join('、') }}
+        </span>
+        <n-button size="small" type="warning" @click="openChooser">去重新获取</n-button>
+      </div>
+    </n-alert>
+
     <n-card :bordered="false" class="table-card">
       <!--
         在两个 n-data-table 上分别加 :key,key 值含 viewMode
@@ -1812,6 +1952,15 @@ function onHistorySortChange(value: { orderBy: string, asc: boolean }): void {
 .toolbar-right {
   display: flex;
   gap: 8px;
+}
+
+/* 临期凭证汇总条：横幅式，但右侧按钮与文字在同一行（默认 alert 会撑高） */
+.expiry-alert-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  line-height: 1.7;
 }
 
 .table-card {

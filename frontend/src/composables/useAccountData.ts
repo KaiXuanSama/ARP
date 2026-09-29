@@ -52,6 +52,10 @@ export interface AccountDataView {
   apiKey: string | null
   enabled: boolean
   updatedAt: number
+  /** 凭证过期时间(毫秒时间戳);null = 无过期信息（API Key 账号或历史数据） */
+  credentialExpiresAt: number | null
+  /** refreshToken 过期时间(毫秒时间戳);null = 无此项 */
+  refreshExpiresAt: number | null
   credit: CreditSnapshot | null
   usage: UsageSnapshot | null
   checkin: CheckinSnapshot | null
@@ -378,6 +382,8 @@ function buildView(): AccountDataView[] {
     apiKey: a.apiKey,
     enabled: a.enabled,
     updatedAt: a.updatedAt,
+    credentialExpiresAt: a.credentialExpiresAt,
+    refreshExpiresAt: a.refreshExpiresAt,
     credit: getCreditSnapshot(a.uid),
     usage: getUsageSnapshot(a.uid),
     checkin: getCheckin(a.uid),
