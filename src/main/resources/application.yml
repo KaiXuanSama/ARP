@@ -55,28 +55,15 @@ custom:
   anthropic:
     bridge-via-openai: true
 
-  # 扫码登录(获取上游凭证)
-  #   背景:新版 workbuddy-desktop.info 对凭证字段做了加密($wbEncrypted 信封),
-  #        无法读取。转而通过登录流程的网络接口获取明文 token。
+  # 扫码登录(插件授权流,获取上游凭证)
+  #   背景:旧书签回传方案随官方封堵 /console/login/enterprise 而失效(2026-10 移除)。
+  #        新链路:服务端伪装官方 CLI 调上游 /v2/plugin/auth/* 三个接口 ——
+  #        创建会话拿官方登录链接 → 用户扫码 → 服务端轮询领取凭证并落库。
+  #        token 永不出服务端,无需书签 / 回传 / CORS / 对外地址配置。
   #
-  #   self-origin: 本服务的对外访问地址,会被写入登录链接的 arp 参数。
-  #                用户浏览器访问 CodeBuddy 登录页后,书签脚本据此回传 token。
-  #                ⚠️ Docker / 反向代理部署时**必须改成用户能访问到的真实地址**,
-  #                   否则回传会失败(浏览器无法访问 localhost:8351)。
-  #    version:     登录页的客户端版本号参数(上游当前为 5.1.7)。
-  #                 上游若加强校验需同步更新。
-  #    allowed-origins: 凭证回传端点(/api/accounts/import-token)的 CORS 白名单,
-  #                     逗号分隔。只有这些来源才会收到 Access-Control-Allow-Origin 响应头。
-  #                     默认只放行 CodeBuddy 登录页(书签脚本的唯一来源)。
-  #                     管理面板自己的请求(同源 / Vite 代理)不需要白名单 ——
-  #                     过滤器只补响应头、不拒绝请求。
+  #   cli-version: 伪装官方 CLI 控制面请求的 UA 版本号。
+  #                UA 形态:CLI/{cli-version} CodeBuddy/{cli-version},上游会校验 UA 形态。
+  #                版本取自官方 CLI(npm @tencent-ai/codebuddy-code)2026-09-28 的 latest(2.159.0);
+  #                上游若收紧校验(返回 400/12403 "check ua"),跟进官方新版号改这里即可。
   login:
-    self-origin: ${ARP_SELF_ORIGIN:http://localhost:8351}
-    version: 5.1.7
-    allowed-origins: ${ARP_ALLOWED_ORIGINS:https://www.codebuddy.cn}
-
-    # 插件授权登录（2026-10 新链路）：伪装官方 CLI 控制面请求的 UA 版本号。
-    #   UA 形态：CLI/{cli-version} CodeBuddy/{cli-version}，上游会校验 UA 形态。
-    #   版本取自官方 CLI（npm @tencent-ai/codebuddy-code）2026-09-28 的 latest（2.159.0）；
-    #   上游若收紧校验（返回 400/12403 "check ua"），跟进官方新版号改这里即可。
     cli-version: 2.159.0

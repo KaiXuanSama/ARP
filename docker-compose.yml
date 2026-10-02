@@ -60,12 +60,6 @@ services:
       # 备用覆盖:如需改库名/模型文件名,改这里后也要同步改 Dockerfile 的 ENTRYPOINT
       SQLITE_URL: jdbc:sqlite:/data/agentreproxy.db
       MODELS_CONFIG_PATH: /data/modelsConfig.json
-      # 扫码登录:必须填用户浏览器能访问到的本服务地址(域名或 IP),否则凭证回传会失败。
-      # 登录链接里的 arp 参数取自这里,书签脚本据此把 token 回传回来。
-      ARP_SELF_ORIGIN: ${ARP_SELF_ORIGIN:-http://localhost:8351}
-      # 回传端点(/api/accounts/import-token)的 CORS 白名单,逗号分隔(默认仅 CodeBuddy 登录页)。
-      # 仅在需要**其他网页**跨域提交时才需要追加;管理面板自己的请求不受此限制。
-      # ARP_ALLOWED_ORIGINS: https://www.codebuddy.cn
     healthcheck:
       # 容器内无 curl,用 wget 探测根路径(/api/* 都需要鉴权,根路径会返回 200/404 都视为存活)
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8351/ >/dev/null 2>&1 || exit 1"]
