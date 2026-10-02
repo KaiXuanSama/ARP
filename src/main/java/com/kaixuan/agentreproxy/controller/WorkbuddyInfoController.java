@@ -2,6 +2,8 @@ package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.dto.AccountResponse;
 import com.kaixuan.agentreproxy.dto.LoginSessionResponse;
+import com.kaixuan.agentreproxy.dto.PluginLoginPollResponse;
+import com.kaixuan.agentreproxy.dto.PluginLoginSessionResponse;
 import com.kaixuan.agentreproxy.dto.TokenImportRequest;
 import com.kaixuan.agentreproxy.entity.WorkbuddyAccountRecord;
 import com.kaixuan.agentreproxy.model.WorkbuddyDesktopInfo;
@@ -11,10 +13,12 @@ import com.kaixuan.agentreproxy.service.AccountEnabledService;
 import com.kaixuan.agentreproxy.service.AccountSaveService;
 import com.kaixuan.agentreproxy.service.AccountSaveService.SaveAction;
 import com.kaixuan.agentreproxy.service.LoginSessionService;
+import com.kaixuan.agentreproxy.service.PluginLoginService;
 import com.kaixuan.agentreproxy.service.TokenImportService;
 import com.kaixuan.agentreproxy.service.WorkbuddyInfoService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -26,6 +30,7 @@ import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -52,6 +57,7 @@ public class WorkbuddyInfoController {
     private final WorkbuddyAccountJdbcRepository accountRepository;
     private final LoginSessionService loginSessionService;
     private final TokenImportService tokenImportService;
+    private final PluginLoginService pluginLoginService;
     private final ObjectMapper objectMapper;
 
     public WorkbuddyInfoController(WorkbuddyInfoService workbuddyInfoService,
@@ -61,6 +67,7 @@ public class WorkbuddyInfoController {
                                    WorkbuddyAccountJdbcRepository accountRepository,
                                    LoginSessionService loginSessionService,
                                    TokenImportService tokenImportService,
+                                   PluginLoginService pluginLoginService,
                                    ObjectMapper objectMapper) {
         this.workbuddyInfoService = workbuddyInfoService;
         this.accountSaveService = accountSaveService;
@@ -69,6 +76,7 @@ public class WorkbuddyInfoController {
         this.accountRepository = accountRepository;
         this.loginSessionService = loginSessionService;
         this.tokenImportService = tokenImportService;
+        this.pluginLoginService = pluginLoginService;
         this.objectMapper = objectMapper;
     }
 
@@ -94,6 +102,70 @@ public class WorkbuddyInfoController {
     @PostMapping("/accounts/login-session")
     public Mono<LoginSessionResponse> createLoginSession() {
         return Mono.fromCallable(loginSessionService::createSession);
+    }
+
+    // ============== 插件授权登录（2026-10 新链路） ==============
+    //
+    // 背景：官方封堵了浏览器侧凭证领取端点，上面的书签回传链路已失效。
+    // 新链路：服务端向上游创建授权会话 → 用户浏览器打开官方登录页扫码 →
+    // 服务端轮询领取凭证并落库（token 永不出服务端，无需书签 / 回传 / CORS）。
+    // 三端点都走 AuthWebFilter 正常鉴权（无跨域调用方，无需白名单改动）。
+    // owner = 管理 token 的 SHA-256（同一用户重新发起会取消其旧会话）。
+
+    /**
+     * 创建插件授权会话 — {@code POST /api/accounts/plugin-login/session}
+     * <p>
+     * 返回官方登录页链接与会话 id。前端展示链接引导用户扫码，
+     * 之后按 {@code interval} 秒轮询 {@link #pollPluginLogin}。
+     */
+    @PostMapping("/accounts/plugin-login/session")
+    public Mono<PluginLoginSessionResponse> createPluginLoginSession(
+            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) {
+        return pluginLoginService.startSession(ownerOf(authorization));
+    }
+
+    /**
+     * 轮询插件授权状态 — {@code POST /api/accounts/plugin-login/{fid}/poll}
+     * <p>
+     * 按 {@code status} 分支：pending（继续轮询）/ success（凭证已落库，响应里
+     * <b>没有 token</b>，只有 uid/nickname/expiresAt）/ expired / error。
+     * 服务端对上游有 3 秒节流与防重入，前端轮询频率与之一致即可。
+     */
+    @PostMapping("/accounts/plugin-login/{fid}/poll")
+    public Mono<PluginLoginPollResponse> pollPluginLogin(
+            @PathVariable String fid,
+            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) {
+        return pluginLoginService.pollSession(ownerOf(authorization), fid);
+    }
+
+    /**
+     * 取消插件授权会话 — {@code DELETE /api/accounts/plugin-login/{fid}}
+     * <p>
+     * 用户关闭弹窗时调用；幂等，会话不存在也返回完成。
+     */
+    @DeleteMapping("/accounts/plugin-login/{fid}")
+    public Mono<Map<String, Object>> cancelPluginLogin(
+            @PathVariable String fid,
+            @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) {
+        return Mono.fromCallable(() -> {
+            pluginLoginService.cancelSession(ownerOf(authorization), fid);
+            return Map.<String, Object>of("status", "cancelled");
+        });
+    }
+
+    /** 管理 token 的 SHA-256（owner 标识；只取摘要，不落原文） */
+    private static String ownerOf(String authorization) {
+        String token = authorization == null ? "" : authorization.trim();
+        if (token.startsWith("Bearer ")) {
+            token = token.substring(7).trim();
+        }
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(token.getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(hash);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
     }
 
     /**

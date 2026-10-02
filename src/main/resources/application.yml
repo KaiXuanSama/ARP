@@ -74,3 +74,9 @@ custom:
     self-origin: ${ARP_SELF_ORIGIN:http://localhost:8351}
     version: 5.1.7
     allowed-origins: ${ARP_ALLOWED_ORIGINS:https://www.codebuddy.cn}
+
+    # 插件授权登录（2026-10 新链路）：伪装官方 CLI 控制面请求的 UA 版本号。
+    #   UA 形态：CLI/{cli-version} CodeBuddy/{cli-version}，上游会校验 UA 形态。
+    #   版本取自官方 CLI（npm @tencent-ai/codebuddy-code）2026-09-28 的 latest（2.159.0）；
+    #   上游若收紧校验（返回 400/12403 "check ua"），跟进官方新版号改这里即可。
+    cli-version: 2.159.0

@@ -47,5 +47,33 @@ public final class UpstreamConstants {
      */
     public static final String PATH_ANTHROPIC_MESSAGES = "/messages";
 
+    // ============== 插件授权（扫码登录，2026-10 新链路） ==============
+    //
+    // 背景：官方封堵了浏览器侧 /console/login/enterprise 凭证领取端点，
+    // 书签回传方案失效。新链路改为服务端插件授权流（协议参考 codebuddy2api，
+    // 经原作者同意移植）：服务端创建 state → 用户浏览器打开登录页扫码 →
+    // 服务端轮询领取凭证（token 永不出服务端，无需书签 / 回传 / CORS）。
+
+    /** 插件授权 Base URL（与 BILLING_BASE_URL 相同 host，单独命名以示用途边界） */
+    public static final String PLUGIN_AUTH_BASE_URL = "https://copilot.tencent.com";
+
+    /** 创建授权会话：POST，返回 state 与 authUrl；响应带 login-session cookie，轮询时必须携带 */
+    public static final String PATH_PLUGIN_AUTH_STATE = "/v2/plugin/auth/state";
+
+    /** 轮询领取凭证：GET；code=11217 表示用户尚未完成登录（pending） */
+    public static final String PATH_PLUGIN_AUTH_TOKEN = "/v2/plugin/auth/token";
+
+    /** 领取账号信息：GET，Bearer accessToken，返回 uid / nickname / enterpriseId */
+    public static final String PATH_PLUGIN_LOGIN_ACCOUNT = "/v2/plugin/login/account";
+
+    /** 授权平台标识（上游按此区分调用方：桌面端 CLI / 插件等） */
+    public static final String LOGIN_PLATFORM = "CLI";
+
+    /** 授权流程请求的 Origin / Referer（伪装官方 CLI 控制面请求） */
+    public static final String LOGIN_ORIGIN = "https://www.codebuddy.cn";
+
+    /** state 创建接口返回的授权页 Cookie 名（轮询领取凭证时原样带回） */
+    public static final String LOGIN_SESSION_COOKIE = "login-session";
+
     private UpstreamConstants() {}
 }
