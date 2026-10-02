@@ -73,13 +73,6 @@ public class AuthWebFilter implements WebFilter {
         if (path.startsWith("/api/auth/")) {
             return false;
         }
-        // 扫码登录的 token 回传端点放行 —— 它由浏览器书签脚本从 codebuddy.cn
-        // 跨域调用，无法携带管理面板 token（跨域请求不带 localStorage 中的值）。
-        // 该端点改用**一次性 ticket** 自鉴权（由 /api/accounts/login-session 下发，
-        // 该端点本身需要管理 token），5 分钟过期、用后即废。详见 LoginSessionService。
-        if (path.equals("/api/accounts/import-token")) {
-            return false;
-        }
         return true;
     }
 
