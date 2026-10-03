@@ -108,7 +108,6 @@ jobs:
           Copy-Item $jar.FullName "$out\agentreproxy.jar"
           Copy-Item launcher\ARP.exe "$out\"
           Copy-Item launcher\arp.ico "$out\"
-          Copy-Item modelsconfig.json "$out\modelsConfig.json" -ErrorAction SilentlyContinue
           Copy-Item src\main\resources\application.yml "$out\" -ErrorAction SilentlyContinue
           Copy-Item src\main\resources\schema.sql "$out\" -ErrorAction SilentlyContinue
 
@@ -172,7 +171,6 @@ jobs:
   #         cp "$JAR" "$APP/Contents/Resources/agentreproxy.jar"
   #         cp src/main/resources/application.yml "$APP/Contents/Resources/" 2>/dev/null || true
   #         cp src/main/resources/schema.sql "$APP/Contents/Resources/" 2>/dev/null || true
-  #         cp modelsconfig.json "$APP/Contents/Resources/modelsConfig.json" 2>/dev/null || true
   #         cp icon.png "$APP/Contents/Resources/arp.png" 2>/dev/null || true
   #         cp dist/arp.icns "$APP/Contents/Resources/arp.icns" 2>/dev/null || true
   #         cat > "$APP/Contents/Info.plist" << 'PLIST'
@@ -237,7 +235,6 @@ jobs:
   #         chmod +x "$OUT/arp.sh"
   #         cp src/main/resources/application.yml "$OUT/" 2>/dev/null || true
   #         cp src/main/resources/schema.sql "$OUT/" 2>/dev/null || true
-  #         cp modelsconfig.json "$OUT/modelsConfig.json" 2>/dev/null || true
   #         cp icon.png "$OUT/arp.png" 2>/dev/null || true
   #     - name: Bundle JRE (jlink)
   #       if: ${{ !inputs.skip_jre }}

@@ -2,10 +2,8 @@
 #
 # 用法:
 #   1. 第一次部署: docker compose up -d --build
-#   2. 修改模型列表: 直接编辑 ./Config/modelsConfig.json,无需重启容器
-#      (注意:models.config.path 由 ENTRYPOINT 硬编码指向 /data/modelsConfig.json,
-#       Spring 启动时一次性读入,运行时改文件需重启容器才生效——这与原 application.yml 行为一致)
-#   3. 备份数据:    整个 ./Config/ 目录就是你的所有持久化状态
+#   2. 模型列表:   内存快照(上游 /v3/config),在管理面板「更新模型列表」按钮刷新,无静态文件
+#   3. 备份数据:    整个 ./Config/ 目录就是你的所有持久化状态(仅 SQLite 数据库)
 #
 # 查看编译过程(默认 Docker 会用进度条覆盖输出,加 --progress=plain 即可):
 #   docker compose build --progress=plain
@@ -50,16 +48,14 @@ services:
       # 容器内始终是 8351，改 .env 后无需动 Dockerfile 的 ENTRYPOINT。
       - "${HOST_PORT:-8351}:8351"
     volumes:
-      # 单一挂载点:数据库 + 模型配置全部落到 ./Config/
+      # 单一挂载点:数据库落到 ./Config/
       # 容器内 /data 软链:
       #   - /data/agentreproxy.db     -> ./Config/agentreproxy.db
-      #   - /data/modelsConfig.json   -> ./Config/modelsConfig.json
       - ./Config:/data
     environment:
       TZ: Asia/Shanghai
-      # 备用覆盖:如需改库名/模型文件名,改这里后也要同步改 Dockerfile 的 ENTRYPOINT
+      # 备用覆盖:如需改库名,改这里后也要同步改 Dockerfile 的 ENTRYPOINT
       SQLITE_URL: jdbc:sqlite:/data/agentreproxy.db
-      MODELS_CONFIG_PATH: /data/modelsConfig.json
     healthcheck:
       # 容器内无 curl,用 wget 探测根路径(/api/* 都需要鉴权,根路径会返回 200/404 都视为存活)
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8351/ >/dev/null 2>&1 || exit 1"]

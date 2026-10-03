@@ -59,7 +59,6 @@ chmod +x "$OUTPUT_DIR/arp.sh"
 # Config files
 cp "$PROJECT_ROOT/src/main/resources/application.yml" "$OUTPUT_DIR/" 2>/dev/null || true
 cp "$PROJECT_ROOT/src/main/resources/schema.sql" "$OUTPUT_DIR/" 2>/dev/null || true
-cp "$PROJECT_ROOT/modelsconfig.json" "$OUTPUT_DIR/modelsConfig.json" 2>/dev/null || true
 cp "$PROJECT_ROOT/icon.png" "$OUTPUT_DIR/arp.png" 2>/dev/null || true
 
 # -- Step 3: Optional bundled JRE --

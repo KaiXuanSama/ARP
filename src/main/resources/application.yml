@@ -22,13 +22,9 @@
 server:
   port: 8351
 
-# 模型列表外部配置(支持 yml / 命令行 / 环境变量覆盖)
-#   - 文件不存在时回退到 classpath 内置 models-config.default.json
-#   - 命令行覆盖: --models.config.path=D:\conf\modelsConfig.json
-#   - 环境变量覆盖(Spring 自动映射): set MODELS_CONFIG_PATH=D:\conf\modelsConfig.json
-models:
-  config:
-    path: ./modelsConfig.json
+# 模型目录:内存快照,来源上游 /v3/config(见 ModelCatalogService)
+#   - 启动自动拉一次 + 管理面板「更新模型列表」手动刷新,无静态文件、无回退
+#   - 目录为空(无账号/从未拉取成功)时 /v1/models 返回 503
 
 # 排查开关:打印 /v1/chat/completions 与 /v1/messages 的每个 SSE chunk 原文
 #   - 默认 false;一次对话动辄上百个 chunk,开启后日志量很大,仅排查时临时打开

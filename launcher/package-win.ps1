@@ -80,11 +80,6 @@ if (Test-Path $icoSrc) {
     Copy-Item $icoSrc (Join-Path $outputDir "arp.ico")
 }
 
-$modelsConfig = Join-Path $projectRoot "modelsconfig.json"
-if (Test-Path $modelsConfig) {
-    Copy-Item $modelsConfig (Join-Path $outputDir "modelsConfig.json")
-}
-
 # Copy Spring Boot config files (external config — Spring Boot auto-reads
 # application.yml from the same directory as the jar)
 $appYml = Join-Path $projectRoot "src\main\resources\application.yml"
