@@ -93,11 +93,10 @@ EXPOSE 8351
 
 # Spring 配置:
 #   - SQLite 文件落到 /data/agentreproxy.db
-#   - 模型配置走 /data/modelsConfig.json(可被用户随时替换)
+#   - 模型目录为内存快照(上游 /v3/config),无静态文件配置
 #   - 工作目录设为 /data,确保 SQLite 的相对路径(若有人传 ./xxx.db)落到这里
 #   - 激活 docker profile,读取 application-docker.yml
 ENTRYPOINT ["java", \
     "-jar", "app.jar", \
     "--spring.profiles.active=docker", \
-    "--spring.datasource.url=jdbc:sqlite:/data/agentreproxy.db", \
-    "--models.config.path=/data/modelsConfig.json"]
+    "--spring.datasource.url=jdbc:sqlite:/data/agentreproxy.db"]

@@ -22,9 +22,5 @@ spring:
 server:
   port: 8351
 
-# 模型列表外部配置（Docker 场景下通常通过环境变量 / mount 进来的 volume 覆盖）
-#   - 留空字符串表示强制回退到 classpath 内置
-#   - 也可写成 /etc/agentreproxy/modelsConfig.json,通过 -v 挂载进来
-models:
-  config:
-    path: ${MODELS_CONFIG_PATH:./modelsConfig.json}
+# 模型目录:内存快照,来源上游 /v3/config(见 ModelCatalogService)
+#   - Docker 与本地行为一致:启动自动拉一次 + 管理面板手动刷新,无静态文件、无回退

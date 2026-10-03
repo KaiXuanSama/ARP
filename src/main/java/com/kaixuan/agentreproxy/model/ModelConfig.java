@@ -3,10 +3,12 @@ package com.kaixuan.agentreproxy.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 /**
- * modelsConfig.json 中单条模型配置项
+ * 模型目录的单条配置项（内存快照，来源上游 /v3/config）
  * <p>
- * 字段: id / family / contextLength(对齐 {@code ModelsConfigService} 当前契约)。
- * 未来加字段(比如 displayName / pricing)时,通过 {@code @JsonIgnoreProperties(ignoreUnknown = true)} 避免旧配置文件加载失败
+ * 由 {@code ModelCatalogService} 在刷新时构造：id ← 上游条目 id、
+ * family ← vendor（空则 unknown）、contextLength ← maxInputTokens。
+ * <p>
+ * 保留 {@code @JsonIgnoreProperties} 仅为兼容历史序列化场景（如将来再落盘）。
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record ModelConfig(

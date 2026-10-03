@@ -13,7 +13,7 @@
  * 未来新增设置项时，在本页面追加新卡片 + 新 ref + 新 save 函数即可，
  * 每个卡片独立保存，不影响其他设置。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
 import {
   NSwitch,
   NTimePicker,
@@ -22,7 +22,9 @@ import {
   NInput,
   NSelect,
   NCheckbox,
+  NDataTable,
   useMessage,
+  type DataTableColumns,
 } from 'naive-ui'
 import { authFetch } from '../utils/auth'
 
@@ -402,7 +404,106 @@ async function runPreview(): Promise<void> {
   }
 }
 
+// ===== 模型列表卡片（2026-10 动态目录） =====
+
+import { useModels } from '../composables/useModels'
+
+const { models: catalogModels, meta: catalogMeta, ensureModelsLoaded } = useModels()
+
+/** 刷新中（POST /api/models/refresh 在途） */
+const refreshingModels = ref(false)
+/** 最近一次刷新的错误信息（成功后清空） */
+const refreshError = ref('')
+
+/** 上游原始条目查看弹窗 */
+const showRawModels = ref(false)
+/** 上游原始条目（GET /api/models/raw 的 data；null = 未加载） */
+const rawModels = ref<Record<string, unknown>[] | null>(null)
+/** 原始条目加载中 */
+const loadingRaw = ref(false)
+/** 原始条目加载失败信息 */
+const rawError = ref('')
+
+/** 原始条目表格列：首列为展开开关（展开显示完整 JSON），后接管理者最关心的字段列 */
+const rawModelColumns: DataTableColumns<Record<string, unknown>> = [
+  {
+    type: 'expand',
+    renderExpand: (row) =>
+      h('pre', { class: 'raw-json' }, JSON.stringify(row, null, 2)),
+  },
+  { title: '模型 ID', key: 'id', minWidth: 200, ellipsis: { tooltip: true } },
+  { title: '展示名', key: 'name', minWidth: 160, ellipsis: { tooltip: true } },
+  { title: '厂商', key: 'vendor', width: 110, ellipsis: { tooltip: true } },
+  { title: '计费倍率', key: 'credits', width: 120, ellipsis: { tooltip: true } },
+  { title: '最大输入', key: 'maxInputTokens', width: 110 },
+  { title: '最大输出', key: 'maxOutputTokens', width: 110 },
+]
+
+/**
+ * 打开「查看模型列表」弹窗并拉取上游原始条目
+ * <p>
+ * 目录为空时按钮禁用，不会走到这里；每次打开都重新拉（数据量小，保持新鲜）。
+ */
+async function openRawModels(): Promise<void> {
+  if (catalogModels.value.length === 0) return
+  showRawModels.value = true
+  loadingRaw.value = true
+  rawError.value = ''
+  rawModels.value = null
+  try {
+    const res = await authFetch('/api/models/raw')
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(body?.message || `请求失败: ${res.status}`)
+    }
+    const list = Array.isArray(body?.data) ? body.data : []
+    rawModels.value = list as Record<string, unknown>[]
+  } catch (e) {
+    rawError.value = e instanceof Error ? e.message : '未知错误'
+  } finally {
+    loadingRaw.value = false
+  }
+}
+
+/** 抓取时间的展示格式（本地时间字符串；无 meta 时为空） */
+const fetchedAtText = computed(() => {
+  const at = catalogMeta.value?.fetchedAt
+  if (!at) return '尚未拉取'
+  return new Date(at).toLocaleString()
+})
+
+/**
+ * 更新模型列表 — POST /api/models/refresh
+ * <p>
+ * 后端随机洗牌遍历启用账号、首个成功即止；成功后前端重拉目录展示新快照。
+ */
+async function refreshModelCatalog(): Promise<void> {
+  if (refreshingModels.value) return
+  refreshingModels.value = true
+  refreshError.value = ''
+  try {
+    const res = await authFetch('/api/models/refresh', { method: 'POST' })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(body?.message || body?.detail || `请求失败: ${res.status}`)
+    }
+    message.success(
+      `已更新：${body?.count ?? '?'} 个模型（来源账号 ${body?.sourceLabel ?? '?'}）`,
+    )
+    // 重拉目录 + meta，卡片展示新快照
+    await ensureModelsLoaded()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    refreshError.value = msg
+    message.error(`更新失败: ${msg}`)
+  } finally {
+    refreshingModels.value = false
+  }
+}
+
 onMounted(async () => {
+  // 模型目录快照（供卡片展示条数/来源/时间；失败静默——卡片有刷新按钮兜底）
+  void ensureModelsLoaded()
   // 进入页面时,从后端拉一次默认值 —— 404 视为"首次未保存"
   await loadFromServer()
 })
@@ -652,6 +753,88 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <!-- ========== 模型列表卡片（2026-10 动态目录） ========== -->
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">模型列表</h3>
+        <p class="card-desc">
+          模型目录来自上游真实接口（按账号拉取），服务启动时自动获取一次，
+          之后在此手动更新。下游 Key 的模型白名单将与该目录严格取交集。
+        </p>
+      </div>
+      <div class="card-body">
+        <div class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">当前目录</span>
+          <div class="setting-row-input">
+            <span v-if="catalogModels.length > 0">
+              共 <strong>{{ catalogModels.length }}</strong> 个模型
+              <span class="catalog-meta">
+                （来源账号 {{ catalogMeta.sourceLabel || '—' }} · 抓取于 {{ fetchedAtText }}）
+              </span>
+            </span>
+            <span v-else class="catalog-empty">
+              目录为空 —— 无可用账号或尚未成功拉取，/v1/models 将拒绝服务，请点击下方按钮更新
+            </span>
+          </div>
+        </div>
+        <div v-if="refreshError" class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">上次错误</span>
+          <div class="setting-row-input catalog-error">{{ refreshError }}</div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <n-space justify="end">
+          <n-button
+            :disabled="catalogModels.length === 0"
+            @click="openRawModels"
+          >
+            查看模型列表
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="refreshingModels"
+            @click="refreshModelCatalog"
+          >
+            更新模型列表
+          </n-button>
+        </n-space>
+      </div>
+    </div>
+
+    <!-- 查看模型列表：上游原始条目（完整字段） -->
+    <n-modal v-model:show="showRawModels" preset="card"
+      title="模型列表（上游原始数据）" style="width:960px; max-width: calc(100vw - 40px);"
+      :mask-closable="false">
+      <div class="raw-models-tip">
+        以下为最近一次拉取时上游 /v3/config 返回的<b>完整原始条目</b>（含计费倍率、上下文限制、
+        推理能力与标签等约束），供了解各模型的能力边界。表列仅展示关键字段，
+        <b>展开行可查看该模型的全部原始 JSON</b>。
+        <span v-if="fetchedAtText" class="catalog-meta">（快照时间：{{ fetchedAtText }}）</span>
+      </div>
+
+      <n-spin :show="loadingRaw">
+        <div v-if="rawError" class="catalog-error">{{ rawError }}</div>
+        <n-data-table
+          v-else
+          :columns="rawModelColumns"
+          :data="rawModels ?? []"
+          :row-key="(row: Record<string, unknown>) => String(row.id)"
+          :max-height="420"
+          size="small"
+          :bordered="false"
+        >
+          <template #empty>暂无数据</template>
+        </n-data-table>
+      </n-spin>
+
+      <template #footer>
+        <n-space justify="space-between" align="center">
+          <span class="catalog-meta">共 {{ rawModels?.length ?? 0 }} 条原始条目</span>
+          <n-button @click="showRawModels = false">关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -835,5 +1018,47 @@ onMounted(async () => {
 
 .setting-row-actions {
   margin-top: 12px;
+}
+
+/* ===== 模型列表卡片 ===== */
+
+.catalog-meta {
+  font-size: 12px;
+  color: #888;
+}
+
+.catalog-empty {
+  color: #d03050;
+  font-size: 13px;
+}
+
+.catalog-error {
+  color: #d03050;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+/* ===== 查看模型列表弹窗 ===== */
+
+.raw-models-tip {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #4e5969;
+  margin-bottom: 12px;
+}
+
+.raw-json {
+  margin: 0;
+  padding: 8px 12px;
+  background: #f7f8fa;
+  border: 1px solid #ececf0;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow: auto;
 }
 </style>

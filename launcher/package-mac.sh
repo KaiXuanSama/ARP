@@ -71,7 +71,6 @@ cp "$JAR_FILE" "$APP_DIR/Contents/Resources/agentreproxy.jar"
 # Copy config files
 cp "$PROJECT_ROOT/src/main/resources/application.yml" "$APP_DIR/Contents/Resources/" 2>/dev/null || true
 cp "$PROJECT_ROOT/src/main/resources/schema.sql" "$APP_DIR/Contents/Resources/" 2>/dev/null || true
-cp "$PROJECT_ROOT/modelsconfig.json" "$APP_DIR/Contents/Resources/modelsConfig.json" 2>/dev/null || true
 
 # Copy icon (png for menu bar)
 if [ -f "$PROJECT_ROOT/icon.png" ]; then

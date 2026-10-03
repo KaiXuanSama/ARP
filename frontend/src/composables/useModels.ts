@@ -28,21 +28,34 @@ export interface ModelItem {
   contextLength?: number
 }
 
+/** 目录元信息（后端 /api/models 的 meta 字段） */
+export interface ModelsMeta {
+  count?: number
+  sourceAccountId?: number
+  sourceLabel?: string
+  fetchedAt?: number
+}
+
 const models = ref<ModelItem[]>([])
+const meta = ref<ModelsMeta>({})
 let loadInFlight: Promise<void> | null = null
 
 async function fetchFromServer(): Promise<void> {
   try {
-    // /api/models 永远返回后端全集(不受 Authorization 影响)
+    // /api/models 永远返回后端目录全集(不受 Authorization 影响) + meta
     const res = await authFetch('/api/models')
     if (!res.ok) throw new Error(`status=${res.status}`)
-    const body = (await res.json().catch(() => ({}))) as { data?: ModelItem[] }
+    const body = (await res.json().catch(() => ({}))) as {
+      data?: ModelItem[]
+      meta?: ModelsMeta
+    }
     const list = Array.isArray(body.data) ? body.data : []
     models.value = list.map((m) => ({
       id: String(m.id),
       family: m.family,
       contextLength: m.contextLength,
     }))
+    meta.value = body.meta ?? {}
   } catch (e) {
     console.warn('[models] 拉取模型清单失败:', e)
   }
@@ -67,7 +80,7 @@ export async function ensureModelsLoaded(): Promise<void> {
 }
 
 /**
- * 返回响应式 models 列表
+ * 返回响应式 models 列表与目录元信息
  * <p>
  * 不在 setup() 里 await ensureModelsLoaded() —— 让调用方自己决定何时拉,避免阻塞
  * 列表渲染。典型用法:onMounted 里 ensureModelsLoaded(),watch models.value 驱动下拉。
@@ -75,6 +88,7 @@ export async function ensureModelsLoaded(): Promise<void> {
 export function useModels() {
   return {
     models,
+    meta,
     ensureModelsLoaded,
   }
 }

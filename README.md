@@ -54,12 +54,13 @@ java -jar target\agentreproxy-0.0.1-SNAPSHOT.jar
 
 **3. 访问管理后台**
 
-打开 <http://localhost:8351>。所有数据(SQLite 数据库 `agentreproxy.db`、模型配置 `modelsConfig.json`)默认落在项目根目录。
+打开 <http://localhost:8351>。数据(SQLite 数据库 `agentreproxy.db`)默认落在项目根目录;模型目录从上游实时拉取、只存内存,不落盘。
 
 > **小贴士**
 > - PowerShell 里务必用 `.\mvnw.cmd` 而不是 `mvnw`,直接打 `mvnw` 在 PowerShell 下不会走 `.cmd` 后缀
 > - 端口冲突?改 `src\main\resources\application.yml` 里的 `server.port`
 > - 想用本地 CodeBuddy `.info` 文件自动导入账号?确认你的 Windows `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\Auth\workbuddy-desktop.info` 存在
+> - 首次启动请先在管理面板「添加账户」导入账号 —— 模型目录依赖账号凭证从上游拉取,无账号时 `/v1/models` 会返回 503
 
 ### 方式二:Linux 服务器 Docker 部署(生产/共享使用)
 
@@ -75,7 +76,7 @@ cd ARP
 
 **2. 一键启动**
 
-默认配置:数据全部落到 `./Config/`,包含 SQLite 数据库和模型配置文件。
+默认配置:数据全部落到 `./Config/`(SQLite 数据库;模型目录只存内存,无文件)。
 ```bash
 docker compose up -d --build
 ```
@@ -153,90 +154,43 @@ docker compose down -v         # 停服 + 清空 Config(危险,会丢数据库)
 |---|---|---|
 | 服务端口 | `8351` | `8351`(主机→容器) |
 | 数据库位置 | `./agentreproxy.db` | `./Config/agentreproxy.db` |
-| 模型配置 | `./modelsConfig.json` | `./Config/modelsConfig.json` |
+| 模型目录 | 内存(上游实时拉取,无文件) | 内存(上游实时拉取,无文件) |
 | 工作目录 | 项目根 | `/app`(容器内),`./`(主机) |
-| 修改后生效 | 重启进程 | 改 `Config/*.json` 需 `docker compose restart app` |
 
-## 模型配置
+## 模型目录
 
-ARP 把"对消费者暴露哪些模型"做成了一份**外部 JSON 配置**。这样你可以:
+ARP 的模型清单**不再依赖任何静态配置文件**,而是直接从上游真实接口拉取
+(`GET copilot.tencent.com/v3/config`,以账号凭证 + 官方 CLI 伪装头调用),
+过滤掉图像/视频等非聊天模型后保存在**内存快照**里。
 
-- 增删模型不用重新编译
-- 不同部署(本地 / 服务器)用不同模型清单
-- 内置一份兜底,第一次启动就有内容
+### 目录怎么更新
 
-### 配置文件在哪
+| 时机 | 行为 |
+|---|---|
+| 服务启动 | 自动拉取一次(异步,不阻塞启动;失败仅记日志,目录留空) |
+| 手动更新 | 管理面板 → 系统设置 → 模型列表 → **「更新模型列表」**按钮 |
+| 其它 | **不会再自动获取** —— 没有定时器、没有 TTL,把刷新时机完全交给管理者 |
 
-| 部署形态 | 路径 | 说明 |
-|---|---|---|
-| Windows 本地 | `<项目根>\modelsConfig.json` | Spring 工作目录下的相对路径,默认存在一份(由 classpath 模板生成) |
-| Docker 部署 | `./Config/modelsConfig.json` | 通过 `docker-compose.yml` 的 volume 挂载到容器内 `/data/modelsConfig.json` |
+手动更新时,服务会把**全部启用账号随机洗牌后顺序尝试**,单个账号失败
+(凭证过期 / 上游拒绝 / 网络错误)自动跳过换下一个,**第一个成功即止**;
+全部失败时保留旧目录不动。
 
-> **首次启动会怎样?** 如果上面两个路径都没有 `modelsConfig.json`,服务会回退到 classpath 内置的 [src/main/resources/models-config.default.json](src/main/resources/models-config.default.json),保证 `/v1/models` 至少返回一份默认清单。
+### 查看模型的完整能力与约束
 
-### 文件格式
+管理面板的「查看模型列表」按钮会弹出**上游原始数据**表格 —— 包含每个模型的
+计费倍率(credits)、最大输入/输出 token、推理能力档位、标签等全部字段,
+展开任意一行可查看该模型的完整 JSON。目录为空时该按钮置灰不可点。
 
-```json
-{
-  "_comment": "随便写,这行会被忽略",
-  "models": [
-    { "id": "auto",            "family": "virtual", "contextLength": 172032 },
-    { "id": "deepseek-v4-pro", "family": "deepseek", "contextLength": 1048576 }
-  ]
-}
-```
+### 目录为空时的行为
 
-| 字段 | 必填 | 说明 |
-|---|---|---|
-| `id` | ✅ | 模型 ID,会出现在 `/v1/models` 和 `/v1/chat/completions` 的 `model` 字段 |
-| `family` | ❌ | 厂商/家族名(仅作分组提示,不影响路由) |
-| `contextLength` | ❌ | 上下文窗口(token 数),给客户端参考 |
+- `/v1/models` 返回 **503**(提示"模型目录不可用")—— 宁可诚实报错,不返回假清单
+- 下游 Key 的模型白名单与目录**严格取交集**:目录为空时交集为空,
+  白名单里的残留模型名不会"救活" —— 需要先更新目录
 
-顶层允许任意字段(Jackson 默认忽略未知字段),所以 `_comment` 之类的注释字段不会报错。
+### 从旧版(modelsConfig.json)升级
 
-### 怎么自定义模型清单
-
-**方式 A:直接编辑配置文件(推荐)**
-
-- Windows:编辑 `<项目根>\modelsConfig.json`,然后重启服务(`Ctrl+C` 停掉再 `.\mvnw.cmd spring-boot:run`)
-- Docker:编辑 `./Config/modelsConfig.json`,然后 `docker compose restart app`
-
-**方式 B:以模板为基础**
-
-仓库自带一份完整的内置模板,你可以复制它作为起点:
-
-- 路径:[src/main/resources/models-config.default.json](src/main/resources/models-config.default.json)
-- 这份文件随 jar 一起发布,改它不会影响正在运行的服务(只对"没有外部配置"时生效)
-- 改完的副本**另存为** `modelsConfig.json` 才生效(外部配置优先于内置)
-
-**方式 C:用环境变量 / 命令行指向别处的配置**
-
-不一定要把配置放项目根,可以把多个部署的模型清单集中放:
-
-```powershell
-# Windows PowerShell:指向 D:\conf\modelsConfig.json
-$env:MODELS_CONFIG_PATH = "D:\conf\modelsConfig.json"
-.\mvnw.cmd spring-boot:run
-
-# Linux:指向 /etc/agentreproxy/modelsConfig.json
-MODELS_CONFIG_PATH=/etc/agentreproxy/modelsConfig.json docker compose up -d
-```
-
-或命令行:
-
-```bash
-java -jar app.jar --models.config.path=/etc/agentreproxy/modelsConfig.json
-```
-
-> **加载时机**:Spring 启动时一次性读入内存,运行期改文件不会自动重载。改了之后**必须重启**服务才生效。
-
-### 验证配置已生效
-
-启动后访问 `<服务地址>/v1/models`,返回的 JSON 里 `data[].id` 应该跟你配置文件里的一致。如果不一致:
-
-1. 检查路径是否对(Windows 大小写不敏感,L/Docker 大小写敏感,见 [AGENTS.md](AGENTS.md) 中"Models config file-name casing trap"提示)
-2. 看启动日志里 `ModelsConfigService` 输出的"加载了 N 个模型"
-3. JSON 写错会**让服务启动失败**(故意如此,避免线上偷偷 200 但缺模型),看 `docker compose logs app` 找原因
+v1.5.0 起静态配置机制已整体移除,`modelsConfig.json` 不再被读取,
+项目根或 `Config/` 下的旧文件可以删除。首次启动新版时会自动从上游拉取真实目录。
 
 ## API 端点
 
@@ -246,7 +200,7 @@ java -jar app.jar --models.config.path=/etc/agentreproxy/modelsConfig.json
 
 - **访问**:`http://localhost:8351/`(Docker 部署换成服务器 IP)
 - **鉴权**:需登录(默认用户名/密码均为 `root`,**首次登录后请立即在「系统设置 → 账号管理」中修改**)
-- 账号管理、签到、流量包、下游 API Key 派发、模型配置、调度设置、请求文本替换都在这里
+- 账号管理、签到、流量包、下游 API Key 派发、模型目录(查看/更新)、调度设置、请求文本替换都在这里
 
 > 登录态是内存中的 token(12 小时有效期),**服务重启后需重新登录**。
 > 忘记密码:删除数据库 `app_settings` 表中 `admin.credential` 这一行,重启服务会重新写入默认 `root/root`。
@@ -299,7 +253,7 @@ curl http://localhost:8351/v1/chat/completions \
 
 - **路径**:`GET /v1/models`
 - **鉴权**:同上,`Authorization: Bearer <API Key>`
-- 返回该 API Key `supportedModels` 白名单内的模型(没配白名单时返回 `modelsConfig.json` 里的全集)
+- 返回该 API Key `supportedModels` 白名单内的模型(没配白名单时返回当前模型目录全集;目录为空时本端点返回 503)
 
 ```bash
 curl http://localhost:8351/v1/models \
@@ -343,8 +297,8 @@ Anthropic 官方 SDK(`anthropic-python` / `@anthropic-ai/sdk`)同样把 `base_ur
 > `credit` 计费信息。因此 `used_credits` 累加与 `credit_limit` 限制**均正常工作**。
 > 如需改为直连上游 Anthropic 端点(零转换但无计费),设 `custom.anthropic.bridge-via-openai=false`。
 >
-> **模型名注意**:`modelsConfig.json` 中**没有 Claude 系列模型**,请填清单里实际存在的 model id
-> (如 `deepseek-v4-flash`)。填 `claude-*` 会撞上游 `11102` 错误。
+> **模型名注意**:当前模型目录(上游拉取)中**没有 Claude 系列模型**,请填目录里实际存在的 model id
+> (如 `deepseek-v4-flash`,可在管理面板「查看模型列表」确认)。填 `claude-*` 会撞上游 `11102` 错误。
 
 ---
 
