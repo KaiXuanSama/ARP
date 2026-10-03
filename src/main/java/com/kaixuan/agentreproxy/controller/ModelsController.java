@@ -2,7 +2,6 @@ package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.model.ModelConfig;
 import com.kaixuan.agentreproxy.service.ModelCatalogService;
-import com.kaixuan.agentreproxy.service.ModelsConfigService;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -42,11 +41,9 @@ import java.util.Map;
 @RequestMapping("/api/models")
 public class ModelsController {
 
-    private final ModelsConfigService modelsConfig;
     private final ModelCatalogService modelCatalog;
 
-    public ModelsController(ModelsConfigService modelsConfig, ModelCatalogService modelCatalog) {
-        this.modelsConfig = modelsConfig;
+    public ModelsController(ModelCatalogService modelCatalog) {
         this.modelCatalog = modelCatalog;
     }
 
@@ -67,17 +64,25 @@ public class ModelsController {
     }
 
     /**
-     * 返回后端维护的全集模型清单
+     * 返回后端维护的全集模型清单 + 目录元信息
      * <p>
-     * 不过滤任何 key(也不接受 Authorization 头)—— 总是返回全集,
-     * 供管理面板的下拉选择 / 表单多选 / 模型预览使用
+     * 数据源为内存模型目录（上游 /v3/config 真实快照）。不过滤任何 key
+     * (也不接受 Authorization 头)—— 总是返回全集,
+     * 供管理面板的下拉选择 / 表单多选 / 模型预览使用。
+     * <p>
+     * 目录为空时 data 为空数组，但<b>不报错</b>（与 /v1/models 的 503 口径不同：
+     * 管理面板需要能正常渲染空态并引导管理员去刷新，而不是整个页面报错）。
+     * meta 始终返回（未拉取时为空对象）。
      */
     @GetMapping
     public Mono<Map<String, Object>> list() {
-        List<Map<String, Object>> data = modelsConfig.getModels().stream()
+        List<Map<String, Object>> data = modelCatalog.getModels().stream()
                 .map(ModelsController::toItem)
                 .toList();
-        return Mono.just(Map.of("data", data));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("data", data);
+        body.put("meta", modelCatalog.getMeta());
+        return Mono.just(body);
     }
 
     /**

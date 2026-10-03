@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaixuan.agentreproxy.model.ModelConfig;
 import com.kaixuan.agentreproxy.service.ChatUsageRefreshScheduler;
 import com.kaixuan.agentreproxy.service.DownstreamApiKeyService;
-import com.kaixuan.agentreproxy.service.ModelsConfigService;
+import com.kaixuan.agentreproxy.service.ModelCatalogService;
 import com.kaixuan.agentreproxy.service.RequestTextReplaceService;
 import com.kaixuan.agentreproxy.service.SettingsService;
 import com.kaixuan.agentreproxy.service.ToolCallPairingService;
@@ -56,7 +56,7 @@ public class OpenAiController {
     private static final Logger log = LoggerFactory.getLogger(OpenAiController.class);
 
     private final UpstreamClient upstream;
-    private final ModelsConfigService modelsConfig;
+    private final ModelCatalogService modelCatalog;
     private final SettingsService settingsService;
     private final ChatUsageRefreshScheduler usageRefreshScheduler;
     private final DownstreamApiKeyService downstreamApiKeyService;
@@ -86,7 +86,7 @@ public class OpenAiController {
     private boolean chunkLogEnabled;
 
     public OpenAiController(UpstreamClient upstream,
-            ModelsConfigService modelsConfig,
+            ModelCatalogService modelCatalog,
             SettingsService settingsService,
             ChatUsageRefreshScheduler usageRefreshScheduler,
             DownstreamApiKeyService downstreamApiKeyService,
@@ -94,7 +94,7 @@ public class OpenAiController {
             ToolCallPairingService toolCallPairingService,
             ObjectMapper objectMapper) {
         this.upstream = upstream;
-        this.modelsConfig = modelsConfig;
+        this.modelCatalog = modelCatalog;
         this.settingsService = settingsService;
         this.usageRefreshScheduler = usageRefreshScheduler;
         this.downstreamApiKeyService = downstreamApiKeyService;
@@ -337,10 +337,11 @@ public class OpenAiController {
     // ============== Models ==============
 
     /**
-     * 数据源由 {@link ModelsConfigService} 决定，优先级：环境变量 {@code MODELS_CONFIG_PATH} →
-     * 工作目录
-     * {@code modelsConfig.json} → classpath 内置
-     * {@code models-config.default.json}。改完配置重启服务生效。
+     * 数据源为内存模型目录（{@link ModelCatalogService}，来自上游 /v3/config 的真实快照；
+     * 启动自动拉一次 + 管理面板手动更新）。
+     * <p>
+     * <strong>目录为空时直接报错（无回退）</strong>：无账号 / 从未成功拉取时返回 503 ——
+     * 宁可诚实报错，不返回过期的假清单。
      * <p>
      * 输出 shape 严格对齐 OpenAI：
      *
@@ -357,19 +358,24 @@ public class OpenAiController {
      * <li>{@code created} ← 全列表共用同一锚点时间（OpenAI 官方也是 created_at 风格）</li>
      * </ul>
      * <p>
-     * <strong>Per-key 模型白名单(2026-07 新增)</strong>:
+     * <strong>Per-key 模型白名单(严格交集,2026-10 数据源切换为内存目录)</strong>:
      * <ul>
      *   <li>请求头 {@code Authorization: Bearer ak-xxxxx} 携带下游 API Key → 按 key 的
-     *       {@code supportedModels} 字段过滤全集</li>
-     *   <li>{@code supportedModels == null} → 不限制(回退全集)</li>
+     *       {@code supportedModels} 字段与目录求<b>严格交集</b>(双向:目录中不在白名单的剔除,
+     *       白名单中不在目录的残留项同样剔除 —— 目录为空时交集为空,残留白名单不救活)</li>
+     *   <li>{@code supportedModels == null} → 不限制(回退目录全集)</li>
      *   <li>{@code supportedModels == []} → 严格不放行,响应 data 为空数组</li>
-     *   <li>{@code supportedModels == ["a","b"]} → 交叉过滤;白名单里找不到的 model id 静默丢弃</li>
-     *   <li>未带 Authorization / Key 格式错 / Key 不存在 → 视为匿名,回退全集</li>
+     *   <li>未带 Authorization / Key 不存在 → 视为匿名,回退目录全集</li>
      * </ul>
      */
     @GetMapping("/models")
     public Mono<Map<String, Object>> listModels(
             @RequestHeader(value = "Authorization", required = false) String authorization) {
+        // 目录为空(无账号 / 从未成功拉取)→ 503,不返回假清单
+        if (modelCatalog.getModels().isEmpty()) {
+            return Mono.error(new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "模型目录不可用：无可用账号或尚未成功拉取，请在管理面板「更新模型列表」"));
+        }
         return settingsService.resolveApiKeyRecord(authorization)
                 .map(this::filterModelsByApiKey)
                 .defaultIfEmpty(getAllModels())
@@ -382,7 +388,7 @@ public class OpenAiController {
     }
 
     /**
-     * 把 {@code /v1/models} 的全集按 API Key 白名单过滤
+     * 把 {@code /v1/models} 的目录全集按 API Key 白名单过滤(严格交集)
      * <p>
      * 调用方应保证 {@code keyRec != null};但这里仍做 null 防御,意外 null 走全集
      */
@@ -392,7 +398,7 @@ public class OpenAiController {
             return getAllModels();
         }
         java.util.List<String> whitelist = keyRec.supportedModels();
-        // null → 不限制,回退全集
+        // null → 不限制,回退目录全集
         if (whitelist == null) {
             return getAllModels();
         }
@@ -400,17 +406,18 @@ public class OpenAiController {
         if (whitelist.isEmpty()) {
             return List.of();
         }
-        // 非空 → 交叉过滤;白名单里找不到的 model id(已删 / 改名)静默丢弃
+        // 非空 → 严格交集:目录为准取序,只保留白名单里存在的 id
+        // (白名单里的残留项自然消失 —— 目录中不存在即交集外)
         java.util.Set<String> allowed = new java.util.HashSet<>(whitelist);
-        return modelsConfig.getModels().stream()
+        return modelCatalog.getModels().stream()
                 .filter(m -> allowed.contains(m.id()))
                 .map(OpenAiController::toOpenAiModelEntry)
                 .toList();
     }
 
-    /** 全模型列表(OpenAI 标准格式) */
+    /** 全模型列表(OpenAI 标准格式,数据源=内存目录) */
     private List<Map<String, Object>> getAllModels() {
-        return modelsConfig.getModels().stream()
+        return modelCatalog.getModels().stream()
                 .map(OpenAiController::toOpenAiModelEntry)
                 .toList();
     }

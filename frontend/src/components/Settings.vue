@@ -402,7 +402,56 @@ async function runPreview(): Promise<void> {
   }
 }
 
+// ===== 模型列表卡片（2026-10 动态目录） =====
+
+import { useModels } from '../composables/useModels'
+
+const { models: catalogModels, meta: catalogMeta, ensureModelsLoaded } = useModels()
+
+/** 刷新中（POST /api/models/refresh 在途） */
+const refreshingModels = ref(false)
+/** 最近一次刷新的错误信息（成功后清空） */
+const refreshError = ref('')
+
+/** 抓取时间的展示格式（本地时间字符串；无 meta 时为空） */
+const fetchedAtText = computed(() => {
+  const at = catalogMeta.value?.fetchedAt
+  if (!at) return '尚未拉取'
+  return new Date(at).toLocaleString()
+})
+
+/**
+ * 更新模型列表 — POST /api/models/refresh
+ * <p>
+ * 后端随机洗牌遍历启用账号、首个成功即止；成功后前端重拉目录展示新快照。
+ */
+async function refreshModelCatalog(): Promise<void> {
+  if (refreshingModels.value) return
+  refreshingModels.value = true
+  refreshError.value = ''
+  try {
+    const res = await authFetch('/api/models/refresh', { method: 'POST' })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(body?.message || body?.detail || `请求失败: ${res.status}`)
+    }
+    message.success(
+      `已更新：${body?.count ?? '?'} 个模型（来源账号 ${body?.sourceLabel ?? '?'}）`,
+    )
+    // 重拉目录 + meta，卡片展示新快照
+    await ensureModelsLoaded()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '未知错误'
+    refreshError.value = msg
+    message.error(`更新失败: ${msg}`)
+  } finally {
+    refreshingModels.value = false
+  }
+}
+
 onMounted(async () => {
+  // 模型目录快照（供卡片展示条数/来源/时间；失败静默——卡片有刷新按钮兜底）
+  void ensureModelsLoaded()
   // 进入页面时,从后端拉一次默认值 —— 404 视为"首次未保存"
   await loadFromServer()
 })
@@ -652,6 +701,48 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <!-- ========== 模型列表卡片（2026-10 动态目录） ========== -->
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">模型列表</h3>
+        <p class="card-desc">
+          模型目录来自上游真实接口（按账号拉取），服务启动时自动获取一次，
+          之后在此手动更新。下游 Key 的模型白名单将与该目录严格取交集。
+        </p>
+      </div>
+      <div class="card-body">
+        <div class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">当前目录</span>
+          <div class="setting-row-input">
+            <span v-if="catalogModels.length > 0">
+              共 <strong>{{ catalogModels.length }}</strong> 个模型
+              <span class="catalog-meta">
+                （来源账号 {{ catalogMeta.sourceLabel || '—' }} · 抓取于 {{ fetchedAtText }}）
+              </span>
+            </span>
+            <span v-else class="catalog-empty">
+              目录为空 —— 无可用账号或尚未成功拉取，/v1/models 将拒绝服务，请点击下方按钮更新
+            </span>
+          </div>
+        </div>
+        <div v-if="refreshError" class="setting-row">
+          <span class="setting-row-label setting-row-label-fixed">上次错误</span>
+          <div class="setting-row-input catalog-error">{{ refreshError }}</div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <n-space justify="end">
+          <n-button
+            type="primary"
+            :loading="refreshingModels"
+            @click="refreshModelCatalog"
+          >
+            更新模型列表
+          </n-button>
+        </n-space>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -835,5 +926,23 @@ onMounted(async () => {
 
 .setting-row-actions {
   margin-top: 12px;
+}
+
+/* ===== 模型列表卡片 ===== */
+
+.catalog-meta {
+  font-size: 12px;
+  color: #888;
+}
+
+.catalog-empty {
+  color: #d03050;
+  font-size: 13px;
+}
+
+.catalog-error {
+  color: #d03050;
+  font-size: 13px;
+  word-break: break-all;
 }
 </style>
