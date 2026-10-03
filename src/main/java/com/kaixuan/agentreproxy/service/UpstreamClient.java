@@ -41,16 +41,31 @@ public class UpstreamClient {
     private final WebClient webClient;
     private final WorkbuddyInfoService workbuddyInfoService;
     private final WorkbuddyAccountJdbcRepository accountRepository;
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    private final String cliVersion;
+
+    /**
+     * 控制面请求的 Base URL（默认取 {@link UpstreamConstants#BILLING_BASE_URL}）。
+     * <p>
+     * 实例字段而非直接用常量，是为了测试时指向 MockWebServer（包内测试可用
+     * ReflectionTestUtils 覆盖）；生产环境永远不会变。
+     */
+    private String controlBaseUrl = UpstreamConstants.BILLING_BASE_URL;
 
     public UpstreamClient(WebClient.Builder builder,
                           WorkbuddyInfoService workbuddyInfoService,
-                          WorkbuddyAccountJdbcRepository accountRepository) {
+                          WorkbuddyAccountJdbcRepository accountRepository,
+                          com.fasterxml.jackson.databind.ObjectMapper objectMapper,
+                          @org.springframework.beans.factory.annotation.Value(
+                                  "${custom.login.cli-version:2.159.0}") String cliVersion) {
         this.webClient = builder
                 .clone()
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
         this.workbuddyInfoService = workbuddyInfoService;
         this.accountRepository = accountRepository;
+        this.objectMapper = objectMapper;
+        this.cliVersion = cliVersion;
     }
 
     // ============== Billing（按 accountId 路由） ==============
@@ -85,6 +100,70 @@ public class UpstreamClient {
                                         .headers(resp.headers().asHttpHeaders())
                                         .body(bodyMap)))
                         .timeout(Duration.ofSeconds(UpstreamConstants.TIMEOUT_SECONDS)));
+    }
+
+    // ============== 模型目录（2026-10 动态化） ==============
+
+    /**
+     * 拉取模型目录 — {@code GET /v3/config}，按 accountId 路由
+     * <p>
+     * 返回该账号可用的模型目录（{@code data.models} 原始条目列表，未过滤）。
+     * 供 {@code ModelCatalogService} 做过滤与映射后存内存。
+     * <p>
+     * <strong>UA 陷阱</strong>：本端点只认 {@code CLI/{v} CodeBuddy/{v}} 控制面形态的
+     * User-Agent（与插件授权流程同一套伪装），其它形态返回业务码 12403 "check ua"。
+     * 版本号复用 {@code custom.login.cli-version} 配置 —— 同一 CLI 指纹版本。
+     * <p>
+     * 失败语义（抛 {@link UpstreamErrorException} 语义的 IllegalStateException）：
+     * HTTP 非 200 / code 非 0 / data.models 非 JSON 数组 —— 由调用方决定跳过该账号。
+     */
+    public Mono<com.fasterxml.jackson.databind.JsonNode> fetchModelConfig(Long accountId) {
+        return resolveAuth(accountId)
+                .flatMap(cred -> webClient.get()
+                        .uri(controlBaseUrl + UpstreamConstants.PATH_MODEL_CONFIG)
+                        .headers(h -> {
+                            applyAuth(h, cred);
+                            applyControlUserAgent(h);
+                        })
+                        .exchangeToMono(resp -> resp.bodyToMono(String.class).defaultIfEmpty("")
+                                .map(body -> parseModelConfigEnvelope(resp.statusCode().value(), body)))
+                        .timeout(Duration.ofSeconds(20)));
+    }
+
+    /** 解析 /v3/config 信封；返回 data.models 数组节点（可能为空数组，但必须是数组） */
+    private com.fasterxml.jackson.databind.JsonNode parseModelConfigEnvelope(
+            int statusCode, String body) {
+        if (statusCode != 200) {
+            throw new IllegalStateException("模型目录 HTTP " + statusCode + ": " + abbreviateBody(body));
+        }
+        com.fasterxml.jackson.databind.JsonNode envelope;
+        try {
+            envelope = objectMapper.readTree(body);
+        } catch (Exception e) {
+            throw new IllegalStateException("模型目录返回格式异常（非 JSON）");
+        }
+        int code = envelope.path("code").asInt(-1);
+        if (code != 0) {
+            // 12403 = UA 校验拒绝；401 类业务码 = 凭证问题 —— 一律交给调用方跳过
+            throw new IllegalStateException("模型目录拉取失败 code=" + code
+                    + " msg=" + envelope.path("msg").asText(""));
+        }
+        com.fasterxml.jackson.databind.JsonNode models = envelope.path("data").path("models");
+        if (!models.isArray()) {
+            throw new IllegalStateException("模型目录响应缺少 data.models 数组");
+        }
+        return models;
+    }
+
+    private static String abbreviateBody(String s) {
+        if (s == null) return "";
+        String t = s.trim();
+        return t.length() > 200 ? t.substring(0, 200) + "…" : t;
+    }
+
+    /** CLI 控制面 UA（与插件授权同一形态：CLI/{v} CodeBuddy/{v}） */
+    private void applyControlUserAgent(HttpHeaders headers) {
+        headers.set(HttpHeaders.USER_AGENT, "CLI/" + cliVersion + " CodeBuddy/" + cliVersion);
     }
 
     // ============== Chat ==============

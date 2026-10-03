@@ -75,5 +75,14 @@ public final class UpstreamConstants {
     /** state 创建接口返回的授权页 Cookie 名（轮询领取凭证时原样带回） */
     public static final String LOGIN_SESSION_COOKIE = "login-session";
 
+    // ============== 模型目录（2026-10 动态化） ==============
+    //
+    // GET /v3/config 返回当前账号可用的模型目录（data.models）。
+    // 与 Billing 同 host（无 /v2 前缀）；必须带 CLI 控制面 UA（CLI/{v} CodeBuddy/{v}），
+    // 否则上游返回业务码 12403 "check ua"。
+
+    /** 模型目录端点路径（拼在 BILLING_BASE_URL 同 host 上） */
+    public static final String PATH_MODEL_CONFIG = "/v3/config";
+
     private UpstreamConstants() {}
 }

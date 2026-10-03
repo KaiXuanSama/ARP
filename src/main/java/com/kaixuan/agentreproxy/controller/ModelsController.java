@@ -1,10 +1,14 @@
 package com.kaixuan.agentreproxy.controller;
 
 import com.kaixuan.agentreproxy.model.ModelConfig;
+import com.kaixuan.agentreproxy.service.ModelCatalogService;
 import com.kaixuan.agentreproxy.service.ModelsConfigService;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
 
 import java.util.LinkedHashMap;
@@ -39,9 +43,27 @@ import java.util.Map;
 public class ModelsController {
 
     private final ModelsConfigService modelsConfig;
+    private final ModelCatalogService modelCatalog;
 
-    public ModelsController(ModelsConfigService modelsConfig) {
+    public ModelsController(ModelsConfigService modelsConfig, ModelCatalogService modelCatalog) {
         this.modelsConfig = modelsConfig;
+        this.modelCatalog = modelCatalog;
+    }
+
+    /**
+     * 触发模型目录刷新 — {@code POST /api/models/refresh}
+     * <p>
+     * 全部启用账号随机洗牌后顺序尝试拉取 {@code /v3/config}，首个成功即止；
+     * 失败时当前目录保留不动。返回刷新结果元信息（count / 来源账号 / 抓取时间）。
+     * <p>
+     * <b>需管理面板 token</b>（AuthWebFilter 正常拦截）。
+     */
+    @PostMapping("/refresh")
+    public Mono<Map<String, Object>> refresh() {
+        return modelCatalog.refresh()
+                .onErrorMap(e -> new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        e.getMessage() == null ? "刷新失败" : e.getMessage()));
     }
 
     /**
