@@ -86,6 +86,24 @@ public class ModelsController {
     }
 
     /**
+     * 返回上游原始模型条目 — {@code GET /api/models/raw}
+     * <p>
+     * 「查看模型列表」模态框的数据源：保留上游 /v3/config 的完整字段
+     * （credits 计费倍率、maxInput/OutputTokens、reasoning 能力、tags 等），
+     * 供管理者了解各模型的约束与能力。条目为拉取时的快照，含被目录过滤掉的
+     * 非聊天模型（便于对照）。
+     * <p>
+     * <b>需管理面板 token</b>。目录为空时返回空数组（前端按钮此刻应为禁用态）。
+     */
+    @GetMapping("/raw")
+    public Mono<Map<String, Object>> rawList() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("data", modelCatalog.getRawModels());
+        body.put("meta", modelCatalog.getMeta());
+        return Mono.just(body);
+    }
+
+    /**
      * 内部契约的单条 model 形态
      * <p>
      * 用 {@link LinkedHashMap} 保字段顺序,前端读起来稳定

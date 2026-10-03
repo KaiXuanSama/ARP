@@ -64,6 +64,14 @@ public class ModelCatalogService {
     /** 当前目录（不可变快照，替换式更新） */
     private volatile List<ModelConfig> models = List.of();
 
+    /**
+     * 上游原始条目快照（保留全部字段，供管理面板「查看模型列表」展示模型能力与约束）。
+     * <p>
+     * 与 {@link #models} 同批写入：原始数组深拷贝为不可变文本快照（JsonNode 本身可变，
+     * 拷贝时经 toString 固化），发布后只读。仅用于展示，不参与路由/白名单逻辑。
+     */
+    private volatile List<JsonNode> rawModels = List.of();
+
     /** 目录元信息（来源账号 / 抓取时间 / 条数），供管理面板展示 */
     private volatile Map<String, Object> meta = Map.of();
 
@@ -136,8 +144,9 @@ public class ModelCatalogService {
                     failures.add("#" + account.id() + " 目录为空");
                     continue;
                 }
-                // 首个成功即止：存快照 + 元信息
+                // 首个成功即止：存快照 + 原始条目 + 元信息
                 this.models = List.copyOf(parsed);
+                this.rawModels = copyRaw(rawModels);
                 this.meta = buildMeta(account, parsed.size());
                 log.info("[模型目录] 刷新成功：{} 个模型（来源账号 #{} {}，失败跳过 {} 个账号：{}）",
                         parsed.size(), account.id(), labelOf(account), failures.size(), failures);
@@ -217,8 +226,43 @@ public class ModelCatalogService {
         return models;
     }
 
+    /**
+     * 上游原始条目快照（含全部字段；从未成功拉取时为空列表）。
+     * <p>
+     * 返回的节点经 toString 固化后重新解析，调用方拿到的是与本服务状态隔离的
+     * 只读副本 —— 即使下游序列化/修改也不会影响内存目录。
+     */
+    public List<JsonNode> getRawModels() {
+        return rawModels;
+    }
+
     /** 目录元信息（count / sourceAccountId / sourceLabel / fetchedAt；从未拉取时为空 map） */
     public Map<String, Object> getMeta() {
         return meta;
+    }
+
+    /**
+     * 原始数组 → 不可变快照：JsonNode 树是可变 DOM，直接引用存字段等于埋雷
+     * （上游响应的解析树被后续复用/修改会污染目录）。这里经 toString 固化，
+     * 重新解析出独立副本；单条解析失败防御跳过，不影响其余条目。
+     */
+    private static List<JsonNode> copyRaw(JsonNode rawModels) {
+        if (rawModels == null || !rawModels.isArray()) {
+            return List.of();
+        }
+        List<JsonNode> out = new ArrayList<>(rawModels.size());
+        com.fasterxml.jackson.databind.ObjectMapper mapper =
+                new com.fasterxml.jackson.databind.ObjectMapper();
+        for (JsonNode entry : rawModels) {
+            if (!entry.isObject()) {
+                continue;
+            }
+            try {
+                out.add(mapper.readTree(entry.toString()));
+            } catch (Exception e) {
+                // 理论上 toString→readTree 不会失败（来源就是合法 JSON）；防御性跳过
+            }
+        }
+        return List.copyOf(out);
     }
 }

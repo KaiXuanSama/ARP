@@ -13,7 +13,7 @@
  * 未来新增设置项时，在本页面追加新卡片 + 新 ref + 新 save 函数即可，
  * 每个卡片独立保存，不影响其他设置。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
 import {
   NSwitch,
   NTimePicker,
@@ -22,7 +22,9 @@ import {
   NInput,
   NSelect,
   NCheckbox,
+  NDataTable,
   useMessage,
+  type DataTableColumns,
 } from 'naive-ui'
 import { authFetch } from '../utils/auth'
 
@@ -413,6 +415,56 @@ const refreshingModels = ref(false)
 /** 最近一次刷新的错误信息（成功后清空） */
 const refreshError = ref('')
 
+/** 上游原始条目查看弹窗 */
+const showRawModels = ref(false)
+/** 上游原始条目（GET /api/models/raw 的 data；null = 未加载） */
+const rawModels = ref<Record<string, unknown>[] | null>(null)
+/** 原始条目加载中 */
+const loadingRaw = ref(false)
+/** 原始条目加载失败信息 */
+const rawError = ref('')
+
+/** 原始条目表格列：首列为展开开关（展开显示完整 JSON），后接管理者最关心的字段列 */
+const rawModelColumns: DataTableColumns<Record<string, unknown>> = [
+  {
+    type: 'expand',
+    renderExpand: (row) =>
+      h('pre', { class: 'raw-json' }, JSON.stringify(row, null, 2)),
+  },
+  { title: '模型 ID', key: 'id', minWidth: 200, ellipsis: { tooltip: true } },
+  { title: '展示名', key: 'name', minWidth: 160, ellipsis: { tooltip: true } },
+  { title: '厂商', key: 'vendor', width: 110, ellipsis: { tooltip: true } },
+  { title: '计费倍率', key: 'credits', width: 120, ellipsis: { tooltip: true } },
+  { title: '最大输入', key: 'maxInputTokens', width: 110 },
+  { title: '最大输出', key: 'maxOutputTokens', width: 110 },
+]
+
+/**
+ * 打开「查看模型列表」弹窗并拉取上游原始条目
+ * <p>
+ * 目录为空时按钮禁用，不会走到这里；每次打开都重新拉（数据量小，保持新鲜）。
+ */
+async function openRawModels(): Promise<void> {
+  if (catalogModels.value.length === 0) return
+  showRawModels.value = true
+  loadingRaw.value = true
+  rawError.value = ''
+  rawModels.value = null
+  try {
+    const res = await authFetch('/api/models/raw')
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(body?.message || `请求失败: ${res.status}`)
+    }
+    const list = Array.isArray(body?.data) ? body.data : []
+    rawModels.value = list as Record<string, unknown>[]
+  } catch (e) {
+    rawError.value = e instanceof Error ? e.message : '未知错误'
+  } finally {
+    loadingRaw.value = false
+  }
+}
+
 /** 抓取时间的展示格式（本地时间字符串；无 meta 时为空） */
 const fetchedAtText = computed(() => {
   const at = catalogMeta.value?.fetchedAt
@@ -734,6 +786,12 @@ onMounted(async () => {
       <div class="card-footer">
         <n-space justify="end">
           <n-button
+            :disabled="catalogModels.length === 0"
+            @click="openRawModels"
+          >
+            查看模型列表
+          </n-button>
+          <n-button
             type="primary"
             :loading="refreshingModels"
             @click="refreshModelCatalog"
@@ -743,6 +801,40 @@ onMounted(async () => {
         </n-space>
       </div>
     </div>
+
+    <!-- 查看模型列表：上游原始条目（完整字段） -->
+    <n-modal v-model:show="showRawModels" preset="card"
+      title="模型列表（上游原始数据）" style="width:960px; max-width: calc(100vw - 40px);"
+      :mask-closable="false">
+      <div class="raw-models-tip">
+        以下为最近一次拉取时上游 /v3/config 返回的<b>完整原始条目</b>（含计费倍率、上下文限制、
+        推理能力与标签等约束），供了解各模型的能力边界。表列仅展示关键字段，
+        <b>展开行可查看该模型的全部原始 JSON</b>。
+        <span v-if="fetchedAtText" class="catalog-meta">（快照时间：{{ fetchedAtText }}）</span>
+      </div>
+
+      <n-spin :show="loadingRaw">
+        <div v-if="rawError" class="catalog-error">{{ rawError }}</div>
+        <n-data-table
+          v-else
+          :columns="rawModelColumns"
+          :data="rawModels ?? []"
+          :row-key="(row: Record<string, unknown>) => String(row.id)"
+          :max-height="420"
+          size="small"
+          :bordered="false"
+        >
+          <template #empty>暂无数据</template>
+        </n-data-table>
+      </n-spin>
+
+      <template #footer>
+        <n-space justify="space-between" align="center">
+          <span class="catalog-meta">共 {{ rawModels?.length ?? 0 }} 条原始条目</span>
+          <n-button @click="showRawModels = false">关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -944,5 +1036,29 @@ onMounted(async () => {
   color: #d03050;
   font-size: 13px;
   word-break: break-all;
+}
+
+/* ===== 查看模型列表弹窗 ===== */
+
+.raw-models-tip {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #4e5969;
+  margin-bottom: 12px;
+}
+
+.raw-json {
+  margin: 0;
+  padding: 8px 12px;
+  background: #f7f8fa;
+  border: 1px solid #ececf0;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow: auto;
 }
 </style>
